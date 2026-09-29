@@ -193,7 +193,7 @@ is recommended in any case, for speed.
 
 ## License
 
-The code was produced on September 28, 2026 by Claude Opus 5.5 and Claude Sonnet 5 (Anthropic)
+The code was produced on September 28-29, 2026 by Claude Opus 5.5 and Claude Sonnet 5 (Anthropic)
 from the formulas of the above paper by Jean-François Burnol.  It is
 licensed under the
 [Creative Commons Attribution-ShareAlike 4.0 International License](https://creativecommons.org/licenses/by-sa/4.0/).

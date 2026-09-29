@@ -32,5 +32,8 @@ Methods:
 3. **Uncertain, may never be done:** modal expansions applied once a
    certain level has been reached.
 
-The code is licensed under the
+The code, and the two READMEs, were produced on September 28-29, 2026 by Claude Opus 5.5 and Claude Sonnet 5 (Anthropic)
+from the formulas of *Block-count constrained harmonic sums: spectral expansion
+  and block-directed Euler–Maclaurin* of September 15, 2026, by Jean-François Burnol.  It is
+licensed under the
 [Creative Commons Attribution-ShareAlike 4.0 International License](https://creativecommons.org/licenses/by-sa/4.0/).
