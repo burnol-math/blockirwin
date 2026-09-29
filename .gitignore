@@ -1,0 +1,6 @@
+__pycache__
+.auto/
+*.aux
+*.dvi
+*.log
+*.out
