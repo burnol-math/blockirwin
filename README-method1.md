@@ -4,7 +4,7 @@
 
 ## Description
 
-This repository provides [`blockirwin.py`](blockirwin.py), a pure Python +
+[`blockirwin.py`](blockirwin.py) is a pure Python +
 [mpmath](https://mpmath.org) script computing to arbitrary precision the
 *block-Irwin sums*
 
@@ -13,10 +13,14 @@ $$I(b,w,k)=\sum_{n>0,\ k_w(n)=k}\frac1n ,$$
 where $b>1$ is the base, $w$ is a non-empty block (word) of base-$b$ digits,
 possibly with leading zeros, and $k_w(n)$ is the number of occurrences of $w$
 in the minimal base-$b$ representation of $n$, occurrences being counted with
-overlaps.  For $k=0$ these are the Kempner-like sums of Schmelzer and Baillie;
-for $w$ a single digit they are the Irwin sums.
+overlaps.
 
-The implementation follows Part 2 of
+The implementation is closely modeled on
+[`kempner.py`](https://gitlab.com/burnolmath/kempner), which was authored by
+the human Jean-François Burnol in April 2026, and computes
+analogous harmonic sums, where the condition on the denominators is to use
+only some allowed digits.  The mathematics for the block
+case (only one block, so far) was provided in Part 2 of
 
 > J.-F. Burnol, *Block-count constrained harmonic sums: spectral expansion and
 > block-directed Euler–Maclaurin*,
@@ -44,10 +48,10 @@ main topic of Part 2 of the paper and, for $k=0$, of its continuation
 > J.-F. Burnol, *The modal expansion of Kempner sums*,
 > [arXiv:2609.31986](https://arxiv.org/abs/2609.31986),
 
-is not used.
+is not used and will be provided in some other code in this repository.
 
 The moment recurrence of Proposition 13 is implemented directly for the
-unscaled moments $v_{j;m}$, all indices $j\le k$ at once.  All quantities
+moments $v_{j;m}$, all indices $j\le k$ at once.  All quantities
 are floating-point numbers at the running precision, which decreases with
 $m$ as in [`kempner.py`](https://gitlab.com/burnolmath/kempner), since the
 moments of index $m$ only enter through terms of size at most
@@ -59,10 +63,13 @@ fly.  The numbers kept from earlier steps are rounded down to the running
 precision whenever it has decreased by 10%, so that multiplications only
 involve mantissas of about the running precision.
 
-In the spirit of the [kempner](https://gitlab.com/burnolmath/kempner)
-script, the code is short and no attempt at parallelization is made.  For
-single-digit $w$, see also the [irwin](https://gitlab.com/burnolmath/irwin)
-repository.
+In the spirit of the [kempner](https://gitlab.com/burnolmath/kempner) script,
+the code is short and no attempt at parallelization is made.  For single-digit
+$w$, see also the [irwin](https://gitlab.com/burnolmath/irwin) repository
+whose `irwin_v5` (SageMath by my human collaborator or its Python+mpmath version
+I produced under its wise direction) has faster runtimes, but this is
+depending on the hardware, and is up to the price of a far more complex internal
+code structure.
 
 ## Usage
 
@@ -133,7 +140,7 @@ following rule, where $d$ is the number of requested digits and $p=|w|$:
 | 5 | any | 4 up to 150 digits, then 5 |
 | 10 | any | 3 below 400 digits; from 600 digits 4 if $k\ge1$; in between 4 only if $k\ge2$; for $k=0$, 3 up to 600 digits, then 4 |
 | 16 | any | 3 |
-| other | any | $1+\operatorname{round}(\log_b(d+100))$ |
+| other | any | $1+\operatorname{round}(\log_b(\operatorname{nboffigures}+100))$ |
 
 This rule was obtained from timings with pure-Python mpmath 1.4.1 (no
 `gmpy2`), for bases 2, 3, 4, 5, 10 and 16, precisions from 100 to 800
@@ -183,7 +190,8 @@ in bases 2, 3, 5, 7, 10, 16.
 mpmath 1.4.0 and 1.4.1, when used with their pure-Python backend (i.e.
 without `gmpy2`), convert to `mpf` the Python integers having many trailing
 zero bits (such as large powers of 2) in quadratic time, see
-[mpmath issue 1073](https://github.com/mpmath/mpmath/issues/1073).  This is
+[mpmath issue 1073](https://github.com/mpmath/mpmath/issues/1073),
+which was opened by the human collaborator some months back.  This is
 fixed in the development version of mpmath but, as of September 28, 2026,
 not in a release; mpmath 1.3.0 is not affected, nor is any version used
 with `gmpy2`.  Such integers occur in this computation, especially in bases
@@ -193,7 +201,9 @@ is recommended in any case, for speed.
 
 ## License
 
-The code was produced on September 28-29, 2026 by Claude Opus 5.5 and Claude Sonnet 5 (Anthropic)
-from the formulas of the above paper by Jean-François Burnol.  It is
-licensed under the
+The code was produced on September 28-29, 2026 by Claude Opus 5.5 and Claude
+Sonnet 5 (Anthropic) from the formulas of the above paper by Jean-François
+Burnol.  It was modeled on the one-digit case handled by the human in the
+[kempner](https://gitlab.com/burnolmath/kempner) repository. It is licensed
+under the
 [Creative Commons Attribution-ShareAlike 4.0 International License](https://creativecommons.org/licenses/by-sa/4.0/).
