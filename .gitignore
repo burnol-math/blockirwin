@@ -4,3 +4,4 @@ __pycache__
 *.dvi
 *.log
 *.out
+docs/_build/
