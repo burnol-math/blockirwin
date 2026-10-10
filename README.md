@@ -74,7 +74,7 @@ and earlier Maple/SageMath/mpmath code of Jean-François Burnol.
 
 The complementary `modalirwin.py`, `test_modalirwin.py` and
 `compare_modalirwin.py` were produced with OpenAI ChatGPT (GPT-6) on October
-10, 2026, from the two Burnol preprints.  This `README.md` was extedned to
+10, 2026, from the two Burnol preprints.  This `README.md` was extended to
 cover this, and then edited by a human, to prune some too lengthy ChatGPT
 output.
 
