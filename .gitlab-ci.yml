@@ -1,0 +1,16 @@
+stages:
+  - deploy
+
+pages:
+  stage: deploy
+  image: python:3.13-slim
+  before_script:
+    - apt-get update && apt-get install make --no-install-recommends -y
+    - python -m pip install sphinx sphinx-math-dollar
+  script:
+    - cd docs && make html
+  after_script:
+    - mv docs/_build/html/ ./public/
+  artifacts:
+    paths:
+    - public
