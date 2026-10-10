@@ -11,6 +11,7 @@ import subprocess
 import sys
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 from blockirwin import blockirwin
 from modalirwin import modalirwin
@@ -18,6 +19,38 @@ from compare_modalirwin import compare_irwin
 
 
 class TestModalExpansion(unittest.TestCase):
+    def coefficient_records(self, output, *, positive_count):
+        """Validate and parse one-field-per-line coefficient diagnostics."""
+        records = []
+        constant = None
+        current = None
+        labels = {'n', 'T', 'lambda', 'L', 'R', 'C', "C'"}
+        value_column = (len('lambda') if positive_count else len('n')) + 3
+        # Ignore the optional separate verbose summary, never mode fields.
+        coefficient_text = output.split('Modal summary:', 1)[0]
+        for line in coefficient_text.splitlines():
+            if not line.strip():
+                continue
+            match = re.fullmatch(r"(constant|n|lambda|L|R|C'|C|T)( +)= (\S+)", line)
+            self.assertIsNotNone(match, f'Invalid coefficient line: {line!r}')
+            label, _, value = match.groups()
+            if label == 'constant':
+                self.assertIsNone(constant)
+                self.assertIsNone(current)
+                constant = value
+                continue
+            self.assertIn(label, labels)
+            self.assertEqual(line.index(value), value_column,
+                             f'Unaligned field: {line!r}')
+            if label == 'n':
+                current = {'n': value}
+                records.append(current)
+            else:
+                self.assertIsNotNone(current, line)
+                self.assertNotIn(label, current)
+                current[label] = value
+        return constant, records
+
     def check(self, base, word, k, digits=12, **opts):
         reference = blockirwin(base, word, k, digits)
         computed = modalirwin(base, word, k, digits, **opts)
@@ -56,6 +89,10 @@ class TestModalExpansion(unittest.TestCase):
         self.assertEqual(result['blockirwin'], result['modalirwin'])
         self.assertIn('elapsed', output.getvalue())
         self.assertIn('modalirwin', output.getvalue())
+        self.assertRegex(output.getvalue(), r'(?m)^base\s+= 10$')
+        self.assertRegex(output.getvalue(), r'(?m)^occurrences\s+= 1$')
+        self.assertRegex(output.getvalue(), r'(?m)^blockirwin result\s+= \S+$')
+        self.assertRegex(output.getvalue(), r'(?m)^modalirwin result\s+= \S+$')
 
     def test_longer_words_and_stability(self):
         self.check(2, '000', 0, 12)
@@ -106,13 +143,14 @@ class TestModalExpansion(unittest.TestCase):
         with redirect_stdout(output):
             result = modalirwin(2, '01', 2, 16, modalcoeffs=True)
         self.assertEqual(result, blockirwin(2, '01', 2, 16))
-        lines = output.getvalue().splitlines()
-        self.assertTrue(lines)
+        constant, records = self.coefficient_records(output.getvalue(),
+                                                     positive_count=True)
+        self.assertIsNone(constant)
+        self.assertTrue(records)
         terms = []
-        for number, line in enumerate(lines, start=1):
-            self.assertRegex(line, rf'^n=\s*{number}\s+lambda=')
-            values = dict(re.findall(r"(lambda|L|R|C'|C|T)=([^ ]+)", line))
-            self.assertEqual(set(values), {'lambda','L','R','C',"C'",'T'})
+        for number, values in enumerate(records, start=1):
+            self.assertEqual(values['n'], str(number))
+            self.assertEqual(set(values), {'n','lambda','L','R','C',"C'",'T'})
             self.assertTrue(values['T'].startswith(('+', '-')))
             with mp.workdps(50):
                 lam, left, right = [mp.mpf(values[x]) for x in ('lambda','L','R')]
@@ -134,19 +172,17 @@ class TestModalExpansion(unittest.TestCase):
                 with redirect_stdout(output):
                     result = modalirwin(2, word, 0, 14, modalcoeffs=True)
                 self.assertEqual(result, blockirwin(2, word, 0, 14))
-                lines = output.getvalue().splitlines()
-                if has_constant:
-                    self.assertEqual(lines.pop(0), 'constant = 1.0')
-                else:
-                    self.assertNotIn('constant', output.getvalue())
-                for number, line in enumerate(lines, start=1):
-                    self.assertRegex(line, rf'^n=\s*{number}\s+T=[+-]')
-                    self.assertNotIn('lambda=', line)
-                    self.assertNotIn('L=', line)
-                    self.assertNotIn('R=', line)
+                constant, records = self.coefficient_records(output.getvalue(),
+                                                             positive_count=False)
+                self.assertEqual(constant, '1.0' if has_constant else None)
+                self.assertTrue(records)
+                for number, values in enumerate(records, start=1):
+                    self.assertEqual(values['n'], str(number))
+                    self.assertEqual(set(values), {'n', 'T'})
+                    self.assertTrue(values['T'].startswith(('+', '-')))
                 with mp.workdps(40):
-                    total = (mp.one if has_constant else mp.zero) + mp.fsum(
-                        mp.mpf(line.split('T=')[1]) for line in lines)
+                    total = (mp.mpf(constant) if has_constant else mp.zero) + mp.fsum(
+                        mp.mpf(values['T']) for values in records)
                     self.assertLess(abs(total - mp.mpf(result)), mp.mpf('1e-12'))
 
     def test_modalcoeffs_verbose_and_special_empty_sum(self):
@@ -154,9 +190,15 @@ class TestModalExpansion(unittest.TestCase):
         with redirect_stdout(output):
             result = modalirwin(10, '42', 3, 10, verbose=True, modalcoeffs=True)
         self.assertEqual(result, blockirwin(10, '42', 3, 10))
-        self.assertIn('First-omitted modal term estimate', output.getvalue())
-        self.assertIn("C'=", output.getvalue())
-        self.assertNotIn('mode    1: term', output.getvalue())
+        text = output.getvalue()
+        constant, records = self.coefficient_records(text, positive_count=True)
+        self.assertIsNone(constant)
+        self.assertTrue(records)
+        self.assertIn('Modal summary:', text)
+        self.assertRegex(text, r'(?m)^estimated omitted-tail magnitude\s+= \S+$')
+        self.assertRegex(text, r'(?m)^threshold\s+= \S+$')
+        self.assertIn('Stopping criterion: heuristic', text)
+        self.assertNotIn('mode    1: term', text)
         output = io.StringIO()
         with redirect_stdout(output):
             self.assertEqual(modalirwin(2, '1', 0, 10, modalcoeffs=True), '0')
@@ -167,25 +209,73 @@ class TestModalExpansion(unittest.TestCase):
             [sys.executable, str(Path(__file__).with_name('modalirwin.py')),
              '2', '01', '1', '10', '--modalcoeffs'],
             capture_output=True, text=True, check=True)
-        self.assertRegex(completed.stdout, r'^n=\s*1\s+lambda=')
+        constant, records = self.coefficient_records(
+            '\n'.join(completed.stdout.splitlines()[:-1]),
+            positive_count=True)
+        # Remove the final result string (not a diagnostic field) above.
+        self.assertIsNone(constant)
+        self.assertEqual(records[0]['n'], '1')
         self.assertEqual(completed.stdout.splitlines()[-1],
                          blockirwin(2, '01', 1, 10))
 
     def test_numerical_stability_retry_and_clean_output(self):
-        # This slowly convergent bordered ternary Kempner sum previously
-        # exhausted the default guard digits.  A failed attempt must not
-        # leak a partial, duplicated list of modal coefficients.
+        # Discarded precision attempts must not leak output.
+        from modalirwin import _ModalNumericalInstability
+        attempts = []
+
+        def worker(*args, **kwargs):
+            guard = kwargs['_guard']
+            attempts.append(guard)
+            print(f'worker diagnostic at guard {guard}')
+            if guard < 36:
+                raise _ModalNumericalInstability('simulated cancellation')
+            return 'verified'
+
+        output = io.StringIO()
+        with patch('modalirwin._modalirwin_once', side_effect=worker):
+            with redirect_stdout(output):
+                result = modalirwin(10, '314', 10, 10, verbose=True)
+        self.assertEqual(result, 'verified')
+        self.assertEqual(attempts, [12, 24, 36])
+        self.assertNotIn('worker diagnostic at guard 12', output.getvalue())
+        self.assertNotIn('worker diagnostic at guard 24', output.getvalue())
+        self.assertEqual(output.getvalue().count('worker diagnostic'), 1)
+        self.assertIn('Precision safeguard: restarted', output.getvalue())
+
+    def test_early_stopping_and_verbose_layout(self):
+        for digits in (20, 40):
+            with self.subTest(digits=digits):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    result = modalirwin(10, '314', 10, digits, verbose=True)
+                self.assertEqual(result, blockirwin(10, '314', 10, digits))
+                text = output.getvalue()
+                modes = re.findall(r'(?m)^mode\s+= (\d+)$', text)
+                self.assertEqual(modes, ['1', '2', '3'])
+                self.assertRegex(text, r'(?m)^modes\s+= 3$')
+                self.assertEqual(len(re.findall(r'(?m)^term\s+= ', text)), 3)
+                self.assertEqual(len(re.findall(r'(?m)^\|term\|\s+= ', text)), 3)
+                self.assertNotIn(';', text)
+
+    def test_exact_binary_empty_case_does_not_construct_engine(self):
+        with patch('modalirwin._ModalEngine', side_effect=AssertionError('engine called')):
+            self.assertEqual(modalirwin(2, '1', 0, 20), '0')
+            self.assertEqual(modalirwin(2, '1', 0, 20, modalcoeffs=True), '0')
+
+    def test_initial_guard_and_relative_threshold(self):
+        from mpmath import mp
         output = io.StringIO()
         with redirect_stdout(output):
-            result = modalirwin(3, '101', 0, 10,
-                                modalcoeffs=True, verbose=True)
-        self.assertEqual(result, blockirwin(3, '101', 0, 10))
-        text = output.getvalue()
-        self.assertIn('Precision safeguard: restarted', text)
-        mode_numbers = [int(num) for num in
-                        re.findall(r'^n=\s*(\d+)\s+T=', text, re.M)]
-        self.assertGreater(len(mode_numbers), 10)
-        self.assertEqual(mode_numbers, list(range(1, len(mode_numbers) + 1)))
+            modalirwin(10, '314', 10, 20, verbose=True)
+        fields = dict(re.findall(r'(?m)^([a-z][a-z -]+?)\s+= (\S+)$',
+                                 output.getvalue()))
+        self.assertEqual(fields['working decimal digits'], '32')
+        self.assertEqual(fields['guard decimal digits'], '12')
+        self.assertGreaterEqual(int(fields['successive decreases']), 2)
+        with mp.workdps(50):
+            expected = 10**3 * mp.log(10) * mp.power(10, -32)
+            self.assertTrue(mp.almosteq(mp.mpf(fields['threshold']), expected,
+                                         rel_eps=mp.mpf('1e-4')))
 
     def test_high_occurrence_count(self):
         self.check(2, '01', 6, 16)

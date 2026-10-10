@@ -10,7 +10,7 @@ Independent Python + mpmath implementation produced by OpenAI GPT-6 on
 October 10, 2026.  This module coexists with the separate implementation
 in blockirwin.py, produced by Claude Opus 5.5 and Claude Sonnet 5.
 
-Truncation and variable precision are heuristic, not certified bounds.
+Modal stopping and cancellation checks are numerical heuristics, not certified bounds.
 For usage, source references, tests and license see README-modalirwin.md.
 Licensed under CC BY-SA 4.0; see the repository LICENSE file.
 """
@@ -20,18 +20,17 @@ from __future__ import annotations
 from collections import defaultdict
 from contextlib import redirect_stdout
 from io import StringIO
-from math import comb, ceil
+from math import comb
 from operator import index
 import sys
 import time
 from mpmath import mp
 
-__version__ = '0.2.0'
+__version__ = '0.3.0'
 
 
 class _ModalNumericalInstability(ArithmeticError):
-    """A coefficient recurrence became unreliable at this precision."""
-
+    """A modal term needs more working precision."""
 
 
 def _print_fields(fields):
@@ -93,6 +92,7 @@ class _ModalEngine:
         self.M = {}        # M[j] contains all computed moments of nu_j
         self.R = [self.mass_v]  # Right coefficients: integrals of eigenpolynomials against eta_0.
         self.U = [self.mass_u]  # Kempner counterparts against mu_0.
+        self._basis_gross = [(abs(self.mass_v), abs(self.mass_u))]
         self._lams = {}
         self._diagonal = {}
         self._coefficient_rows = {}
@@ -201,11 +201,19 @@ class _ModalEngine:
             index = len(self.R)
             total_R = mp.zero
             total_U = mp.zero
+            gross_R = abs(self.v[index])
+            gross_U = abs(self.u[index]) if self.need_kempner else mp.zero
             for i in range(index):
                 c = comb(index,i)*self._mom(i+1,index-i)
-                total_R += c*self.R[i]
+                summand_R = c*self.R[i]
+                total_R += summand_R
+                gross_R += abs(summand_R)
                 if self.need_kempner:
-                    total_U += c*self.U[i]
+                    summand_U = c*self.U[i]
+                    total_U += summand_U
+                    gross_U += abs(summand_U)
+            # Record gross coefficient magnitudes for cancellation checks.
+            self._basis_gross.append((gross_R, gross_U))
             self.R.append(self.v[index]-total_R)
             if self.need_kempner:
                 self.U.append(self.u[index]-total_U)
@@ -239,77 +247,86 @@ class _ModalEngine:
         return {n: coeff for n, coeff in counts.items() if coeff}
 
     def linear_A(self, j, arguments, tolerance):
-        """Evaluate a finite linear combination of A_j(n) by Newton series.
+        """Evaluate an A_j combination and its positive/negative totals.
 
-        Raise each argument before evaluation.  The first omitted row
-        with the tilted moment replaced by 1 estimates its magnitude;
-        only the moment recurrences retain full engine precision.
+        All signed Newton contributions are classified *before* their
+        cancellation.  This permits a per-modal-term cancellation check.
+        The omitted-row tolerance remains heuristic.
         """
-        raised = defaultdict(lambda: mp.zero)
+        raised_plus = defaultdict(lambda: mp.zero)
+        raised_minus = defaultdict(lambda: mp.zero)
         for n, coeff in arguments.items():
             if not coeff:
                 continue
             for N, rcoeff in self._raised_arguments(j,n).items():
-                raised[N] += coeff*rcoeff
-        raised = {N: weight for N, weight in raised.items() if weight}
+                contribution = coeff*rcoeff
+                if contribution >= 0:
+                    raised_plus[N] += contribution
+                else:
+                    raised_minus[N] -= contribution
+        # Do not cancel these contributions before measuring their sizes.
+        # The net coefficients are needed only for the Newton cutoff test.
+        raised = {N: raised_plus[N]-raised_minus[N]
+                  for N in raised_plus.keys() | raised_minus.keys()}
         if not raised:
-            return mp.zero
-        # Grouped Newton rows share the same M_{j;q}.
-        total = mp.zero
+            return mp.zero, mp.zero, mp.zero
         powers = {N: mp.power(N,-j) for N in raised}
-        coeff_guard = max(0, int(mp.mag(max(abs(x) for x in raised.values()))*0.30103)+2)
+        positives, negatives = [], []
         q = 0
-        # Omitted-row estimate uses absolute argument weights; this avoids
-        # cancellation but is not an estimate of the entire series tail.
         while True:
             binomial = comb(j+q-1,q)
-            bound = binomial*mp.fsum(abs(raised[N])*abs(powers[N])
-                                    for N in raised)
-            # Obtain any new nu_j moments at the engine's *full* precision.
             moment = self._mom(j,q)
-            # Remaining precision budget decreases with the absolute size
-            # of the Newton row.  This is a heuristic, not a certification.
-            vanished_digits = max(0, int(-mp.mag(bound)*0.30103)) if bound else 9999
-            row_dps = min(self._base_dps, max(25, self._base_dps
-                          - max(0, vanished_digits-coeff_guard-6)))
-            with mp.workdps(row_dps):
-                weights = mp.fsum(raised[N]*powers[N] for N in raised)
-                next_term = (-1 if q%2 else 1)*binomial*weights*moment
-            total += next_term
+            signed_factor = (-1 if q%2 else 1)*binomial*moment
+            # Evaluate signed contributions at the engine precision.
+            for N in raised:
+                positive_part = signed_factor*raised_plus[N]*powers[N]
+                negative_part = -signed_factor*raised_minus[N]*powers[N]
+                for contribution in (positive_part, negative_part):
+                    if contribution >= 0:
+                        positives.append(contribution)
+                    else:
+                        negatives.append(-contribution)
             self._stats['newton_rows'] += 1
-            self._stats['reduced_rows'] += int(row_dps < self._base_dps)
             for N in powers:
                 powers[N] /= N
             q += 1
-            # Use ABSOLUTE weights (avoid cancellation of the a priori bound).
             omitted = comb(j+q-1,q)*mp.fsum(abs(raised[N])*abs(powers[N])
-                                               for N in raised)
+                                                for N in raised)
             if omitted < tolerance:
                 break
             if q > 20000:
                 raise ArithmeticError('Newton series did not reach requested tolerance')
-        return total
+        positive = mp.fsum(positives)
+        negative = mp.fsum(negatives)
+        return positive-negative, positive, negative
 
     def modal_term(self, j, k, tolerance, modalcoeffs=False):
+        """Return one mode and the positive/negative contributions to it.
+
+        For k>=1 the right modal factor scales the signed Newton sums.
+        For k=0 the left/right coefficients enter the Newton combination.
+        """
         m = j-1
         R, U = self._basis_coefficients(m)
         if j == 1:
             if k >= 1:
                 left = mp.log(self.b)
                 term = self.mass_v * left
-                return (term, (mp.one, left, self.mass_v)) if modalcoeffs else term
+                return term, (mp.one, left, self.mass_v), abs(term), mp.zero
             if all(x == 0 for x in self.w):
-                term = (self.mass_u*mp.log(self.b) - self.mass_v*
-                        mp.fsum(mp.log1p(mp.one/(a*self.b**self.p))
-                                for a in range(1,self.b)))
+                positive = self.mass_u*mp.log(self.b)
+                negative = self.mass_v*mp.fsum(
+                    mp.log1p(mp.one/(a*self.b**self.p))
+                    for a in range(1,self.b))
             else:
-                term = (self.mass_u*mp.log(self.b) -
-                        (self.mass_v*mp.log1p(mp.one/self.nw)
-                         if self.w[0] else mp.zero))
-            return (term, None) if modalcoeffs else term
+                positive = self.mass_u*mp.log(self.b)
+                negative = (self.mass_v*mp.log1p(mp.one/self.nw)
+                            if self.w[0] else mp.zero)
+            return positive-negative, None, positive, negative
         if k >= 1:
             lam = self.lam(j)
-            tolerance = tolerance/max(mp.mpf('1e-60'),abs(R*lam**(k-1)))
+            multiplier = R*lam**(k-1)
+            tolerance = tolerance/max(mp.mpf('1e-60'), abs(multiplier))
             a = defaultdict(lambda: mp.zero)
             for d in range(1,self.b):
                 a[d] += lam
@@ -318,12 +335,16 @@ class _ModalEngine:
                     a[d*self.b**h+suffix] += lam-1
             if self.w[0]:
                 a[self.nw] -= lam-1
-            left = (-1 if m%2 else 1)*self.linear_A(j,a,tolerance)
-            term = left*lam**(k-1)*R
-            return (term, (lam, left, R)) if modalcoeffs else term
+            left, positive, negative = self.linear_A(j,a,tolerance)
+            if m%2:
+                left, positive, negative = -left, negative, positive
+            term = left*multiplier
+            if multiplier < 0:
+                positive, negative = negative, positive
+            magnitude = abs(multiplier)
+            return term, (lam, left, R), positive*magnitude, negative*magnitude
         a = defaultdict(lambda: mp.zero)
         if all(x == 0 for x in self.w):
-            # Level-2 Kempner series: finite initial harmonic sum external.
             for n in range(self.b,self.b*self.b):
                 a[n] += U
             for d in range(1,self.b):
@@ -333,18 +354,16 @@ class _ModalEngine:
                 a[d] += U
             if self.w[0]:
                 a[self.nw] -= R
-        term = (-1 if m%2 else 1)*self.linear_A(j,a,tolerance)
-        return (term, None) if modalcoeffs else term
+        term, positive, negative = self.linear_A(j,a,tolerance)
+        if m%2:
+            term, positive, negative = -term, negative, positive
+        return term, None, positive, negative
 
 
 def _modalirwin_once(b: int, w, k: int, nboffigures: int = 100,
                      ell=None, verbose=False, trunc=False, *, max_modes=1000,
-                     modalcoeffs=False, _extra_guard=0) -> str:
-    """Run one modal calculation at a fixed full recurrence precision.
-
-    This worker is private.  The public entry point handles safe restarts
-    if the numerical coefficient-growth safeguard is triggered.
-    """
+                     modalcoeffs=False, _guard=12) -> str:
+    """Run one calculation with the given decimal guard precision."""
     if int(b) != b or b < 2:
         raise ValueError('b must be an integer >= 2')
     b = int(b)
@@ -368,19 +387,17 @@ def _modalirwin_once(b: int, w, k: int, nboffigures: int = 100,
         return '0'
 
     started = time.perf_counter()
-    # Extra digits protect moment/eigenpolynomial cancellation.  The public
-    # wrapper can retry this worker with a larger guard if it is insufficient.
-    guard = max(45, ceil(0.8*nboffigures)+30,
-                (len(digits)-1)*nboffigures+30 if b == 2 else 0)
-    full_dps = nboffigures + guard + _extra_guard
-    # Three additional target digits provide a pragmatic stopping margin.
-    target = mp.power(10, -(nboffigures+3))
-    engine = None
+    # Each attempt uses its supplied decimal guard precision.
+    full_dps = nboffigures + _guard
     terms = []
-    small_count = 0
+    decreasing_run = 0
+    cancellation_max = 0
     with mp.workdps(full_dps):
+        # A modal term is undetectable relative to the natural scale
+        # b**len(w) * log(b) at requested figures plus twelve digits.
+        scale = mp.power(b, len(digits)) * mp.log(b)
+        target = scale * mp.power(10, -(nboffigures+12))
         engine = _ModalEngine(b,digits,ell,need_kempner=(k == 0))
-        engine._base_dps = full_dps
         answer = mp.zero
         if k == 0 and all(x == 0 for x in digits):
             constant = mp.fsum(mp.one/a for a in range(1,b))
@@ -388,33 +405,67 @@ def _modalirwin_once(b: int, w, k: int, nboffigures: int = 100,
             if modalcoeffs:
                 _print_fields([('constant', mp.nstr(constant, nboffigures))])
                 print()
-        # Full precision for cached recurrences, reduced precision for small
-        # Newton rows.  The outer modal stopping estimate is empirical.
+        # Recurrences and Newton contributions use one working precision.
         for j in range(1,max_modes+1):
-            # Per-mode A_j accuracy is scaled to the modal contribution.
-            # This does not affect the precision of stored M, u, v or R.
-            mode_result = engine.modal_term(j, k, target/(100 if j == 1 else 10),
-                                            modalcoeffs=modalcoeffs)
-            if modalcoeffs:
-                term, factors = mode_result
-            else:
-                term = mode_result
-            if (j >= 10 and terms and abs(term) > 0 and
-                    mp.mag(abs(term)) >
-                    max((mp.mag(abs(x)) for x in terms[-5:] if x),
-                        default=-mp.inf) + 20):
+            # Scale the Newton-series cutoff to this modal contribution.
+            term, factors, positive, negative = engine.modal_term(
+                j, k, target/(100 if j == 1 else 10),
+                modalcoeffs=modalcoeffs)
+            magnitude = abs(term)
+            # Estimate lost decimal digits from positive and negative
+            # components of THIS mode only, not from other modal terms.
+            gross = positive+negative
+            # The right/left factors are themselves built by subtractive
+            # recurrences.  Include cancellation in these factors when
+            # estimating the precision needed for this one modal term.
+            if j > 1:
+                R, U = engine.R[j-1], (engine.U[j-1] if k == 0 else None)
+                gross_R, gross_U = engine._basis_gross[j-1]
+                if k >= 1:
+                    if R:
+                        gross *= max(mp.one, gross_R/abs(R))
+                    elif gross_R:
+                        gross = mp.inf
+                else:
+                    coeff_amplification = mp.one
+                    if U and gross_U:
+                        coeff_amplification = max(coeff_amplification,
+                                                  gross_U/abs(U))
+                    elif gross_U:
+                        gross = mp.inf
+                    if R and gross_R:
+                        coeff_amplification = max(coeff_amplification,
+                                                  gross_R/abs(R))
+                    elif gross_R:
+                        gross = mp.inf
+                    gross *= coeff_amplification
+            loss = (max(mp.zero, mp.log10(gross/magnitude))
+                    if magnitude and gross else
+                    (mp.inf if gross else mp.zero))
+            cancellation_max = max(cancellation_max, loss)
+            # With d working decimal digits, unresolved rounding is on
+            # the scale of gross*10**(-d), even if term rounds to zero.
+            # This is a numerical heuristic, not an interval error bound.
+            rounding_proxy = gross*mp.power(10, -full_dps)
+            if (gross and rounding_proxy >= target and
+                    (magnitude < target or loss > _guard-2)):
                 raise _ModalNumericalInstability(
-                    'modal coefficient recurrence lost numerical stability')
+                    f'mode {j}: positive/negative cancellation '
+                    f'requires more than {_guard} guard digits')
+            if terms:
+                decreasing_run = (decreasing_run+1 if
+                                  magnitude < abs(terms[-1]) else 0)
+                # An isolated upward movement is not by itself evidence of
+                # instability; repeated nondecrease without meeting the
+                # stopping rule is handled by a bounded mode limit.
+            # For an unresolved cancellation smaller than the threshold,
+            # rounding_proxy < target is essential before treating it as
+            # negligible.  Do not mistake an inaccurate zero for evidence.
             answer += term
             terms.append(term)
-            # Proxy for the first omitted term: twice the most recent
-            # magnitude.  Require three consecutive small modes to stop;
-            # neither this proxy nor the tail is rigorously bounded.
-            first_omitted_estimate = 2*abs(term)
-            if j >= 5 and first_omitted_estimate < target:
-                small_count += 1
-            else:
-                small_count = 0
+            # Heuristic proxy for the entire omitted tail: twice the
+            # most recent term's magnitude.  Not a rigorous error bound.
+            omitted_tail_estimate = 2 * abs(term)
             if modalcoeffs:
                 if j > 1:
                     print()
@@ -440,7 +491,8 @@ def _modalirwin_once(b: int, w, k: int, nboffigures: int = 100,
                     ('term', mp.nstr(term, 12)),
                     ('|term|', mp.nstr(abs(term), 5)),
                 ])
-            if small_count >= 3:
+            if (j >= 3 and decreasing_run >= 2 and
+                    2*(magnitude+rounding_proxy) < target):
                 break
         else:
             raise ArithmeticError(f'modal expansion exceeded max_modes={max_modes}')
@@ -457,13 +509,17 @@ def _modalirwin_once(b: int, w, k: int, nboffigures: int = 100,
                 ('base moments', engine._stats['basic_moments']),
                 ('cached coefficient rows', len(engine._coefficient_rows)),
                 ('Newton rows', engine._stats['newton_rows']),
-                ('reduced-precision Newton rows', engine._stats['reduced_rows']),
+                ('maximum modal cancellation digits', mp.nstr(cancellation_max, 5)),
                 ('elapsed time', f'{time.perf_counter()-started:.3f}s'),
-                ('first-omitted modal term estimate',
-                 mp.nstr(first_omitted_estimate, 5)),
+                ('estimated omitted-tail magnitude',
+                 mp.nstr(omitted_tail_estimate, 5)),
+                ('working decimal digits', full_dps),
+                ('guard decimal digits', _guard),
+                ('successive decreases', decreasing_run),
+                ('reference scale', mp.nstr(scale, 6)),
                 ('threshold', mp.nstr(target, 5)),
             ])
-            print('Stopping criterion: heuristic; NOT a certified error bound')
+            print('Stopping criterion: heuristic (NOT a certified error bound)')
     return result
 
 
@@ -478,33 +534,37 @@ def modalirwin(b: int, w, k: int, nboffigures: int = 100,
     level raising of auxiliary modal Stieltjes arguments, not the level
     setting of the other method.  ``modalcoeffs`` prints signed mode
     terms and, for k >= 1, lambda, L, R, C and C' (mode n starts at 1).
-    ``max_modes`` limits runtime; reaching it raises ArithmeticError.
+    ``max_modes`` limits the number of terms; reaching it raises
+    ArithmeticError.
 
-    Precision reductions, modal stopping and automatic stability retries
-    are numerical heuristics, not rigorous accuracy certificates.
+    Stop after three consecutive term magnitudes in strict descent and once
+    the tail proxy is below b**len(w)*log(b)*10**(-nboffigures-12).
+    Each term has separate positive and negative Newton contributions;
+    substantial unresolved cancellation triggers fresh-cache retries at
+    12, 24, 36, ... decimal guard digits. All error indicators and the
+    modal tail criterion remain heuristic, not certified bounds.
     """
-    # Most calls succeed without a restart.  A new worker must be created
-    # on each retry: cached recurrence values cannot be promoted in place.
-    # Redirect output until the successful attempt, so a failed attempt
-    # cannot print a misleading partial coefficient list.
-    retries = (0, 80, 240)
-    for attempt, extra_guard in enumerate(retries):
+    # Each attempt owns an independent recurrence cache. Suppress output from
+    # unsuccessful attempts, so displayed modes always belong to one run.
+    guard = 12
+    max_guard = 240
+    while guard <= max_guard:
         output = StringIO()
         try:
             with redirect_stdout(output):
                 result = _modalirwin_once(
                     b, w, k, nboffigures, ell, verbose, trunc,
-                    max_modes=max_modes, modalcoeffs=modalcoeffs,
-                    _extra_guard=extra_guard)
+                    max_modes=max_modes, modalcoeffs=modalcoeffs, _guard=guard)
         except _ModalNumericalInstability as exc:
-            if attempt + 1 == len(retries):
+            if guard == max_guard:
                 raise ArithmeticError(
-                    'modal calculation remained numerically unstable '
-                    'after increasing working precision') from exc
+                    f'modal calculation remained unstable at '
+                    f'{max_guard} guard digits') from exc
+            guard += 12
             continue
-        if verbose and attempt:
+        if verbose and guard > 12:
             print('Precision safeguard: restarted calculation')
-            _print_fields([('additional guard digits', extra_guard)])
+            _print_fields([('guard decimal digits', guard)])
         sys.stdout.write(output.getvalue())
         return result
     raise AssertionError('unreachable precision-retry state')

@@ -33,13 +33,22 @@ def compare_irwin(b, w, k, nboffigures=30, ell=None, *, verbose=False):
     with mp.workdps(nboffigures+10):
         difference = abs(mp.mpf(classical)-mp.mpf(modal))
         difference_text = mp.nstr(difference, 6)
-    print(f'I({b}, {w!r}, {k}) at {nboffigures} significant figures')
-    print(f'blockirwin (Propositions 11–13): {classical}')
-    print(f'    elapsed: {middle-started:.6f} s')
-    print(f'modalirwin (modal expansion):  {modal}')
-    print(f'    elapsed: {finished-middle:.6f} s')
-    print(f'absolute difference in printed values: {difference_text}')
-    print('Modal truncation uses heuristic rather than certified error control.')
+    print('Method comparison:')
+    fields = [
+        ('base', b),
+        ('word', repr(w)),
+        ('occurrences', k),
+        ('significant figures', nboffigures),
+        ('blockirwin result', classical),
+        ('blockirwin elapsed', f'{middle-started:.6f}s'),
+        ('modalirwin result', modal),
+        ('modalirwin elapsed', f'{finished-middle:.6f}s'),
+        ('absolute difference', difference_text),
+    ]
+    width = max(len(label) for label, _ in fields)
+    for label, value in fields:
+        print(f'{label:<{width}} = {value}')
+    print('Modal truncation is heuristic, not a certified error bound.')
     return {'blockirwin': classical, 'modalirwin': modal,
             'blockirwin_seconds': middle-started,
             'modalirwin_seconds': finished-middle,

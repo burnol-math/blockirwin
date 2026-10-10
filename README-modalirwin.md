@@ -72,7 +72,7 @@ The result is a **decimal string**, compatible with the return format of
 | `nboffigures` | Requested number of significant figures, at least 6 (default 100) |
 | `ell` | Minimum number of base-`b` digits in the **auxiliary modal Stieltjes arguments** after level raising; default 3 in base 2 and 2 otherwise |
 | `verbose` | Print per-mode magnitudes, recurrence counts, timings, and the heuristic stopping indicator |
-| `trunc` | Use the original module's truncation-style decimal output instead of ordinary rounding |
+| `trunc` | Truncate the decimal result rather than round it |
 | `max_modes` | Maximum modal indices to evaluate; raise `ArithmeticError` if no stopping decision is obtained |
 | `modalcoeffs` | Print signed modal contributions and, for `k >= 1`, their modal factors |
 
@@ -99,7 +99,8 @@ Request `modalcoeffs=True` to see modes in **increasing order `n=1,2,...`**.
 This index is the same as the paper's `j` and equals `m+1` where the
 paper indexes a series from `m=0`.
 
-For `k >= 1`, each printed row contains `lambda`, `L`, `R`,
+For `k >= 1`, each mode is printed as a separate, aligned block of fields,
+one numerical value per line: `n`, `lambda`, `L`, `R`,
 `C=L*R`, `C'=L*R/lambda`, and the actual signed contribution
 `T=C*lambda**(k-1)` (equivalently `T=C'*lambda**k`).
 The first mode has `lambda=1`, `L=log(b)`, `R=b**len(w)`.
@@ -107,7 +108,8 @@ The first mode has `lambda=1`, `L=log(b)`, `R=b**len(w)`.
 there is no additional alternating-sign multiplier on the display.
 A leading `+` is shown for positive terms.
 
-For `k = 0`, only the numbered signed contributions `T` are printed.
+For `k = 0`, only the numbered signed contributions `n` and `T` are printed
+(one numerical value per line).
 When `w=0^p`, the separate finite constant `sum(1/a, a=1,...,b-1)`
 is printed before the modes. The degenerate binary forbidden word `w='1'`
 with `k=0` has no admissible positive integers, so its sum is zero.
@@ -118,8 +120,11 @@ modalirwin(2, "00", 0, 20, modalcoeffs=True)
 ```
 
 The display uses values from the actual computation; it does not recalculate
-the expensive modal integrals. `verbose` and `modalcoeffs` may be combined.
-Each invocation computes one `k`; the returned value remains a decimal string.
+the expensive modal integrals. Coefficients, per-mode diagnostics, and the
+verbose summary each put one numerical value on each line, with aligned
+values and spaces around the equal signs. `verbose` and `modalcoeffs` may
+be combined. Each invocation computes one `k`; the returned value remains
+a decimal string.
 
 ## Computational outline
 
@@ -133,31 +138,50 @@ the occurrence-free `mu_0` moments. The word `0^p` receives the further
 level-raising transformation required in the Kempner paper.
 
 The expensive coefficient rows of the recurrences are cached per engine;
-the cache and moment computations are confined to one full working
-precision. Later Newton-series rows use progressively fewer digits when
-their estimated contributions become small.
+the cache and moment computations are confined to one working precision.
+The Newton-series contributions use the same working precision,
+with positive and negative contributions accumulated separately.
 
-**Accuracy policy.** The stopping rule is deliberately *heuristic* and is
-not a rigorous error certificate. Auxiliary Newton series are truncated
-by an absolute-weight estimate of the first omitted row, with the tilted
-moment bounded by one. The outer modal sum uses twice the magnitude of
-the most recent term as a rough proxy for the first omitted modal term
-and stops after three consecutive small terms. It does **not** claim that
-this proxy bounds the entire remaining tail. Working precision includes
-guard digits for cancellation. If the modal coefficient sequence shows a
-large numerical instability, the calculation is restarted with more
-working precision and fresh caches (up to two retries). If the numerical
-safeguards or `max_modes` still fail, an exception is raised, rather than
-silently returning unreliable digits.
+**Accuracy policy.** Every *individual modal term* is evaluated by
+separately accumulating the positive and negative contributions of its
+Newton series, including contributions that cancel when raised arguments
+coincide. Cancellation inside the right and left modal coefficient
+recurrences is also included in the precision indicator. Comparing the
+gross contribution with the resulting difference estimates the number of
+decimal digits lost by subtraction. A term which appears negligible is
+not accepted on that basis unless the estimated uncertainty from this
+cancellation is also negligible on the requested scale.
+
+The first attempt has **12 decimal guard digits** beyond `nboffigures`.
+If a term is not adequately resolved at that precision, the calculation
+restarts with fresh caches and **12 additional decimal guard digits**:
+12, 24, 36, 48, ... (maximum 240). The attempt is restarted because all
+moment and modal-coefficient caches must share one working precision.
+This check is applied separately to **each term**, including `k=0`.
+The working-precision/cancellation estimate is heuristic, not a rigorous
+interval bound on rounding errors.
+
+The natural scale is `b**len(w) * log(b)`. The fixed significance
+threshold is this scale multiplied by `10**(-(nboffigures+12))`,
+regardless of the guard precision reached after retries. The series
+stops when three successive modal terms decrease strictly in absolute
+value (two decreases), provided twice the sum of the latest term's
+magnitude and its estimated cancellation uncertainty is below the
+threshold. This tail indicator is heuristic, not a rigorous error
+bound. Auxiliary Newton series use a heuristic first-omitted-row
+criterion. Reaching `max_modes` or the
+precision ceiling raises an exception instead of reporting a result.
+The exceptional exact sum `I(2, "1", 0)` returns `"0"` immediately.
 
 The chosen method and precision policy are experimental; timings and the
 number of modes depend on the block, occurrence count, base, and hardware.
 For high-stakes precision requirements, independently cross-check results.
-Some slowly converging parameters cannot be evaluated at the requested
-precision by the current code. For example, `b=10, w="101", k=0` at
-10 significant figures has triggered the numerical stability safeguard
-even after the allowed retries. This is an acknowledged implementation
-limitation; `blockirwin.py` is available as an independent alternative.
+Some parameters, including longer-word Kempner cases, can be
+computationally expensive. The current full regression suite did not
+finish within a three-minute limit; it reached
+`test_longer_words_and_stability` without reporting a failure. This is
+not evidence that all remaining tests pass. `blockirwin.py` remains
+available for independent cross-checks.
 
 ## Command line, comparisons, and tests
 
@@ -169,8 +193,8 @@ python modalirwin.py 2 01 2 20 --modalcoeffs
 python modalirwin.py 2 00 0 20 --modalcoeffs --verbose
 python modalirwin.py 37 1,2 1 20
 python compare_modalirwin.py 2 01 0 20
-python -m unittest test_modalirwin.py
-python -m pytest -q test_modalirwin.py test_blockirwin.py
+python -m unittest test_modalirwin.py test_modalirwin_cancellation.py
+python -m pytest -q test_modalirwin.py test_modalirwin_cancellation.py test_blockirwin.py
 ```
 
 `compare_modalirwin.py` imports the two modules simultaneously, prints
@@ -185,9 +209,9 @@ blocks, words with leading zeros, the all-zero exception, explicit `ell`,
 large bases, higher requested precisions, and the numeric truncation flag.
 It also checks the recurrence row cache, coefficient-output identities,
 mode numbering and signs, co-importing, the command-line program,
-input validation, and the automatic working-precision safeguard. The
-original `test_blockirwin.py` remains unchanged. Existing pytest warnings
-from return values in two original test functions do not constitute new
-failures of the modal method.
+input validation, and the automatic working-precision safeguard.
+`test_modalirwin_cancellation.py` provides short tests of signed-term
+accumulation and linear guard increments. The independent
+`test_blockirwin.py` suite is not modified.
 
 For the other method, see [`README-method1.md`](README-method1.md).
