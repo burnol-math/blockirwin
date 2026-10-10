@@ -34,6 +34,13 @@ class _ModalNumericalInstability(ArithmeticError):
 
 
 
+def _print_fields(fields):
+    """Print one labeled diagnostic value per line, aligned by label width."""
+    width = max(len(label) for label, _ in fields)
+    for label, value in fields:
+        print(f'{label:<{width}} = {value}')
+
+
 def _digits(base, word):
     if isinstance(word, int):
         raise TypeError('w must be a string or digit sequence (leading zeros matter)')
@@ -379,7 +386,8 @@ def _modalirwin_once(b: int, w, k: int, nboffigures: int = 100,
             constant = mp.fsum(mp.one/a for a in range(1,b))
             answer += constant
             if modalcoeffs:
-                print(f'constant = {mp.nstr(constant, nboffigures)}')
+                _print_fields([('constant', mp.nstr(constant, nboffigures))])
+                print()
         # Full precision for cached recurrences, reduced precision for small
         # Newton rows.  The outer modal stopping estimate is empirical.
         for j in range(1,max_modes+1):
@@ -408,21 +416,30 @@ def _modalirwin_once(b: int, w, k: int, nboffigures: int = 100,
             else:
                 small_count = 0
             if modalcoeffs:
+                if j > 1:
+                    print()
                 signed_term = ('+' if term >= 0 else '') + mp.nstr(term, nboffigures)
+                fields = [('n', j)]
                 if k >= 1:
                     lam, left, right = factors
                     product = left*right
-                    print(f'n={j:4d}  lambda={mp.nstr(lam, nboffigures)}  '
-                          f'L={mp.nstr(left, nboffigures)}  '
-                          f'R={mp.nstr(right, nboffigures)}  '
-                          f'C={mp.nstr(product, nboffigures)}  '
-                          f"C'={mp.nstr(product/lam, nboffigures)}  "
-                          f'T={signed_term}')
-                else:
-                    print(f'n={j:4d}  T={signed_term}')
+                    fields.extend([
+                        ('lambda', mp.nstr(lam, nboffigures)),
+                        ('L', mp.nstr(left, nboffigures)),
+                        ('R', mp.nstr(right, nboffigures)),
+                        ('C', mp.nstr(product, nboffigures)),
+                        ("C'", mp.nstr(product/lam, nboffigures)),
+                    ])
+                fields.append(('T', signed_term))
+                _print_fields(fields)
             elif verbose:
-                print(f'mode {j:4d}: term {mp.nstr(term, 12)}, '
-                      f'|term|={mp.nstr(abs(term), 5)}')
+                if j > 1:
+                    print()
+                _print_fields([
+                    ('mode', j),
+                    ('term', mp.nstr(term, 12)),
+                    ('|term|', mp.nstr(abs(term), 5)),
+                ])
             if small_count >= 3:
                 break
         else:
@@ -432,17 +449,21 @@ def _modalirwin_once(b: int, w, k: int, nboffigures: int = 100,
         if trunc:
             result = result[:-7]
         if verbose:
-            print(f'{len(terms)} modes, last = {mp.nstr(terms[-1],6)}; '
-                  f'{engine._stats["nu_moments"]} tilted moments, '
-                  f'{engine._stats["basic_moments"]} base moments, '
-                  f'{len(engine._coefficient_rows)} cached coefficient rows, '
-                  f'{engine._stats["newton_rows"]} Newton rows '
-                  f'({engine._stats["reduced_rows"]} reduced precision); '
-                  f'{time.perf_counter()-started:.3f}s')
-            print(f'First-omitted modal term estimate: '
-                  f'{mp.nstr(first_omitted_estimate, 5)}; '
-                  f'threshold {mp.nstr(target, 5)} '
-                  '(heuristic; NOT a certified error bound)')
+            print('\nModal summary:')
+            _print_fields([
+                ('modes', len(terms)),
+                ('last modal term', mp.nstr(terms[-1], 6)),
+                ('tilted moments', engine._stats['nu_moments']),
+                ('base moments', engine._stats['basic_moments']),
+                ('cached coefficient rows', len(engine._coefficient_rows)),
+                ('Newton rows', engine._stats['newton_rows']),
+                ('reduced-precision Newton rows', engine._stats['reduced_rows']),
+                ('elapsed time', f'{time.perf_counter()-started:.3f}s'),
+                ('first-omitted modal term estimate',
+                 mp.nstr(first_omitted_estimate, 5)),
+                ('threshold', mp.nstr(target, 5)),
+            ])
+            print('Stopping criterion: heuristic; NOT a certified error bound')
     return result
 
 
@@ -482,8 +503,8 @@ def modalirwin(b: int, w, k: int, nboffigures: int = 100,
                     'after increasing working precision') from exc
             continue
         if verbose and attempt:
-            print(f'Precision safeguard: restarted with {extra_guard} '
-                  'additional guard digits.')
+            print('Precision safeguard: restarted calculation')
+            _print_fields([('additional guard digits', extra_guard)])
         sys.stdout.write(output.getvalue())
         return result
     raise AssertionError('unreachable precision-retry state')
