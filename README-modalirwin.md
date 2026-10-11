@@ -53,6 +53,10 @@ redistributing adaptations.
 Python 3 and [`mpmath`](https://mpmath.org/), plus Python's standard library.
 No imports from `blockirwin.py` are needed inside the modal module.
 
+**Environment used for the reported validations:** CPython **3.13.5**,
+`mpmath` **1.3.0**, without `gmpy2`.  The tests have not established
+compatibility or performance under `mpmath` 1.4.x.
+
 ```python
 from modalirwin import modalirwin
 
@@ -137,51 +141,156 @@ For `k = 0`, it uses the modal Kempner expansion and additionally computes
 the occurrence-free `mu_0` moments. The word `0^p` receives the further
 level-raising transformation required in the Kempner paper.
 
-The expensive coefficient rows of the recurrences are cached per engine;
-the cache and moment computations are confined to one working precision.
-The Newton-series contributions use the same working precision,
-with positive and negative contributions accumulated separately.
+Recurrence coefficients and moments are cached at the precision at
+which they were computed. Working precision can decrease between modes,
+while the accumulated sum is maintained at the requested digits plus
+12 guard digits. When increased accuracy is needed, a term may be
+recomputed using a fresh recurrence engine rather than attempting to
+recover lost digits from a lower-precision cache.
 
-**Accuracy policy.** Every *individual modal term* is evaluated by
-separately accumulating the positive and negative contributions of its
-Newton series, including contributions that cancel when raised arguments
-coincide. Cancellation inside the right and left modal coefficient
-recurrences is also included in the precision indicator. Comparing the
-gross contribution with the resulting difference estimates the number of
-decimal digits lost by subtraction. A term which appears negligible is
-not accepted on that basis unless the estimated uncertainty from this
-cancellation is also negligible on the requested scale.
+**Accuracy and precision policy.** For requests of 30 significant digits or
+fewer, the initial working precision is fixed at the requested digits plus
+12 guard digits.  Above 30 digits, the budget for a new modal contribution
+is reduced according to the magnitude of the preceding contribution
+relative to `b**len(w) * log(b)`.  Positive and negative contributions are
+accumulated separately in the Newton series and monitored for cancellation;
+the moment and coefficient recurrences also contribute to the cancellation
+indicator.  When the estimated loss of precision is too large, the current
+mode is retried with increased precision and a fresh recurrence cache.
+Higher precision may also be retained for subsequent modes when required.
+The diagnostics `modalcoeffs=True` and `verbose=True` expose the precision
+used and the number of retries.
 
-The first attempt has **12 decimal guard digits** beyond `nboffigures`.
-If a term is not adequately resolved at that precision, the calculation
-restarts with fresh caches and **12 additional decimal guard digits**:
-12, 24, 36, 48, ... (maximum 240). The attempt is restarted because all
-moment and modal-coefficient caches must share one working precision.
-This check is applied separately to **each term**, including `k=0`.
-The working-precision/cancellation estimate is heuristic, not a rigorous
-interval bound on rounding errors.
+The stopping threshold is `b**len(w) * log(b) * 10**(-(nboffigures+12))`.
+The twelve digits here are a **working precision and stopping margin**,
+not a mathematical guarantee of twelve correct guard digits after all
+intermediate operations.
+After two consecutive decreases in modal-term magnitude, the calculation
+stops when twice the magnitude of the last term, together with its
+cancellation uncertainty indicator, is below the threshold.  Twice the
+last term is an **estimated bound for the tail starting with that term,
+inclusive**, not an estimate of the remaining tail after that term.
+The stopping indicator is not a mathematically certified error bound.
+Reaching `max_modes` or the allowed precision-retry limit raises an
+exception rather than returning an unchecked value. The exceptional
+sum `I(2, "1", 0)` is exactly zero.
 
-The natural scale is `b**len(w) * log(b)`. The fixed significance
-threshold is this scale multiplied by `10**(-(nboffigures+12))`,
-regardless of the guard precision reached after retries. The series
-stops when three successive modal terms decrease strictly in absolute
-value (two decreases), provided twice the sum of the latest term's
-magnitude and its estimated cancellation uncertainty is below the
-threshold. This tail indicator is heuristic, not a rigorous error
-bound. Auxiliary Newton series use a heuristic first-omitted-row
-criterion. Reaching `max_modes` or the
-precision ceiling raises an exception instead of reporting a result.
-The exceptional exact sum `I(2, "1", 0)` returns `"0"` immediately.
+### mpmath version caveat: large powers of two
 
-The chosen method and precision policy are experimental; timings and the
-number of modes depend on the block, occurrence count, base, and hardware.
-For high-stakes precision requirements, independently cross-check results.
-Some parameters, including longer-word Kempner cases, can be
-computationally expensive. The current full regression suite did not
-finish within a three-minute limit; it reached
-`test_longer_words_and_stability` without reporting a failure. This is
-not evidence that all remaining tests pass. `blockirwin.py` remains
-available for independent cross-checks.
+As described in [`README-method1.md`](README-method1.md#about-mpmath-versions),
+the **pure-Python** backend in `mpmath` **1.4.0 and 1.4.1** is affected
+by a slow conversion of Python integers with many trailing zero bits to
+`mpf` ([mpmath issue 1073](https://github.com/mpmath/mpmath/issues/1073)).
+That README reports the issue absent in 1.3.0 and when using `gmpy2`.
+`blockirwin.py` has an explicit trailing-zero stripping workaround.
+
+**`modalirwin.py` is potentially affected too.** In particular, its
+recurrence coefficients involve `integer**degree` multiplied by
+`mpmath` values (in `_ModalEngine._de()`), and level raising and moment
+computations also involve large Python integers. For binary words and
+powers-of-two radices, these operands can have many trailing zero bits.
+The modal implementation has **no corresponding conversion workaround**;
+we have not tested its performance under `mpmath` 1.4.0/1.4.1. For a
+known unaffected configuration, use `mpmath` 1.3.0, or consult the
+issue and `README-method1.md` when using a newer version or `gmpy2`.
+This caveat concerns potential performance degradation, not evidence
+of incorrect numerical results.
+
+### Numerically expensive cases
+
+The modal series are geometrically convergent, as established in Burnol's
+papers.  **Geometric convergence does not imply that every instance is
+fast at high requested precision.**  Some small-base examples, notably
+Kempner sums (`k=0`) for binary words, require many modes before their
+contributions become small enough.  Moreover, the work for each mode can
+increase with the modal index: evaluating its coefficients and tilted
+moments extends triangular recurrences and Newton series, and cancellation
+can require additional precision or a fresh cache.  Thus two separate
+costs matter: the **number of modes** and the **cost per mode**.
+
+For example, the following are single-run measurements of a recent
+working revision of `modalirwin.py`, in base 2, at **20 requested
+significant digits** (CPython 3.13.5, `mpmath` 1.3.0). Times measure the function call,
+excluding Python startup and imports; they are not performance guarantees.
+
+| Word | `k` | Modal terms | Modal elapsed | `blockirwin.py` elapsed |
+| --- | ---: | ---: | ---: | ---: |
+| `01` | 0 | 54 | 0.58 s | not measured |
+| `00` | 0 | 98 | 2.61 s | 0.003 s |
+| `11` | 0 | 107 | 4.31 s | 0.003 s |
+| `000` | 0 | 96 | 2.94 s | 0.012 s |
+| `010` | 0 | 80 | 2.28 s | 0.006 s |
+| `0110` | 0 | 94 | 4.09 s | not measured |
+| `11` | 1 | 54 | 0.55 s | 0.004 s |
+| `111` | 1 | 36 | 0.50 s | not measured |
+
+All 20 combinations comprising binary `00`, `11`, and the eight three-digit
+binary words, each for `k=0` and `k=1`, were also compared at 20 digits;
+all completed with matching requested decimal strings.  The two methods
+have very different computational costs, and the alternative method can be
+much faster.  This does **not** establish that every case agrees at 40 or
+60 digits.
+
+In the final revision, binary `01` with `k=0` at 40 digits took
+2.61 s and 87 modes (minimum 47 working digits, versus 52 initially); binary `00` and `11` with `k=0` each exceeded a
+12-second per-case limit.  Those two cases were **not completed** at
+40 digits in this measurement.
+
+Additional independently checked measurements from earlier revisions
+(same environment; use them as cost illustrations, not final-version benchmarks):
+
+| Word | `k` | Digits | Modal terms | Modal time | `blockirwin.py` time | Agreement |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `001` | 0 | 40 | 59 | 1.08 s | 0.006 s | yes |
+| `01` | 0 | 60 | 121 | 8.17 s | 0.003 s | yes |
+| `11` | 1 | 60 | 120 | 5.72 s | 0.008 s | yes |
+| `111` | 1 | 60 | 80 | 4.81 s | 0.021 s | yes |
+
+A final-version check at 60 digits gave 7.31 s for binary `01`,
+`k=0` (minimum 63 working digits versus 72 initially), and
+4.75 s for binary `11`, `k=1` (72 working digits throughout
+because its cancellation-sensitive recurrences prevented reduction).
+Both matched `blockirwin.py`. These checks demonstrate that reducing
+precision does not automatically reduce total running time.
+
+More generally, these figures illustrate
+implementation cost, not a universal ordering of convergence rates or a
+claim that all Kempner cases are expensive.
+
+For reproducible comparisons and independent numerical cross-checks, use
+`compare_modalirwin.py` and report requested digits, number of computed
+modes, both elapsed times, and whether the returned decimal strings agree.
+The alternative `blockirwin.py` algorithm can be preferable for costly
+modal cases.  A completed comparison at 20 digits does not establish
+correctness at 40 or 60 digits.
+
+### Decimal-radix performance and large occurrence counts
+
+The dependence on `k` differs markedly between the two algorithms.
+`blockirwin.py` does **not** use modal terms; its moment recurrences
+can become more expensive as the occurrence count grows. The modal
+expansion can instead converge after fewer modes for large `k`.
+For instance, with `b=10`, `w="314"`, at 40 digits, earlier timings
+were 0.0124 s and 0.0234 s for method 1 (`k=1` and `k=10`), versus
+0.277 s and 0.0045 s for `modalirwin.py` 0.5.0. These measurements
+illustrate contrasting trends, not a general monotonicity theorem.
+
+For ordinary decimal examples at **100 significant digits**, previous
+single-run comparisons of `modalirwin.py` 0.3.0 and 0.5.0 gave:
+
+| Word | `k` | 0.3.0 time | 0.5.0 time | Gain with 0.5.0 |
+| --- | ---: | ---: | ---: | ---: |
+| `42` | 3 | 1.133 s | 0.884 s | 22% |
+| `123` | 1 | 1.914 s | 1.601 s | 16% |
+| `7` | 2 | 3.505 s | 2.752 s | 21% |
+
+All three agreed with `blockirwin.py` to the requested precision.
+The modified solver's minimum working precision fell from its initial
+112 digits to 24, 47, and 31 digits respectively. Savings are
+**case-dependent**: for binary `01`, `k=0`, at 60 digits, the revised
+code was about 21% slower than 0.3.0, despite reducing precision.
+These are historical measurements, **not new benchmarks**; neither
+algorithm is universally faster.
 
 ## Command line, comparisons, and tests
 
@@ -195,7 +304,14 @@ python modalirwin.py 37 1,2 1 20
 python compare_modalirwin.py 2 01 0 20
 python -m unittest test_modalirwin.py test_modalirwin_cancellation.py
 python -m pytest -q test_modalirwin.py test_modalirwin_cancellation.py test_blockirwin.py
+python benchmark_modalirwin_binary.py --digits 20,40,60 --total-seconds 170
 ```
+
+`benchmark_modalirwin_binary.py` tests binary `00`, `11`, and every
+three-digit binary word for both `k=0` and `k=1`, at the selected
+precisions.  Each independent method has an individual timeout; the driver
+also has a total time limit and writes its CSV output after every case.
+A timeout is recorded as *unverified*, not as success.
 
 `compare_modalirwin.py` imports the two modules simultaneously, prints
 each result, the elapsed wall-clock times, and the difference of their
@@ -209,9 +325,10 @@ blocks, words with leading zeros, the all-zero exception, explicit `ell`,
 large bases, higher requested precisions, and the numeric truncation flag.
 It also checks the recurrence row cache, coefficient-output identities,
 mode numbering and signs, co-importing, the command-line program,
-input validation, and the automatic working-precision safeguard.
-`test_modalirwin_cancellation.py` provides short tests of signed-term
-accumulation and linear guard increments. The independent
-`test_blockirwin.py` suite is not modified.
+input validation, and cancellation-triggered precision retries.
+`test_modalirwin_cancellation.py` checks signed-term accumulation,
+12-digit guard settings, per-mode diagnostics, precision reduction on
+an example, and the absence of wrapper-level global restarts.
+The independent `test_blockirwin.py` suite is not modified.
 
 For the other method, see [`README-method1.md`](README-method1.md).

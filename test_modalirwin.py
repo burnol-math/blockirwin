@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Regression checks for Burnol's modal expansions, implemented by GPT-6.
+"""Regression tests for the GPT-6 implementation of Burnol's modal series.
 
-Produced October 10, 2026.  The formulas are entirely J.-F. Burnol's;
-see README-modalirwin.md and the repository CC BY-SA 4.0 LICENSE.
+Check selected results against the independent blockirwin.py method,
+plus recurrence caches, diagnostics, input handling, and the CLI.
+The mathematical formulas are due to J.-F. Burnol; see
+README-modalirwin.md and the repository CC BY-SA 4.0 LICENSE.
 """
 import io
 from pathlib import Path
@@ -24,14 +26,14 @@ class TestModalExpansion(unittest.TestCase):
         records = []
         constant = None
         current = None
-        labels = {'n', 'T', 'lambda', 'L', 'R', 'C', "C'"}
-        value_column = (len('lambda') if positive_count else len('n')) + 3
-        # Ignore the optional separate verbose summary, never mode fields.
+        labels = {'n', 'budget digits', 'working digits', 'T', 'lambda', 'L', 'R', 'C', "C'"}
+        value_column = len('working digits') + 3
+        # Exclude the verbose summary, which follows the mode records.
         coefficient_text = output.split('Modal summary:', 1)[0]
         for line in coefficient_text.splitlines():
             if not line.strip():
                 continue
-            match = re.fullmatch(r"(constant|n|lambda|L|R|C'|C|T)( +)= (\S+)", line)
+            match = re.fullmatch(r"(constant|n|budget digits|working digits|lambda|L|R|C'|C|T)( +)= (\S+)", line)
             self.assertIsNotNone(match, f'Invalid coefficient line: {line!r}')
             label, _, value = match.groups()
             if label == 'constant':
@@ -150,7 +152,7 @@ class TestModalExpansion(unittest.TestCase):
         terms = []
         for number, values in enumerate(records, start=1):
             self.assertEqual(values['n'], str(number))
-            self.assertEqual(set(values), {'n','lambda','L','R','C',"C'",'T'})
+            self.assertEqual(set(values), {'n','budget digits','working digits','lambda','L','R','C',"C'",'T'})
             self.assertTrue(values['T'].startswith(('+', '-')))
             with mp.workdps(50):
                 lam, left, right = [mp.mpf(values[x]) for x in ('lambda','L','R')]
@@ -178,7 +180,7 @@ class TestModalExpansion(unittest.TestCase):
                 self.assertTrue(records)
                 for number, values in enumerate(records, start=1):
                     self.assertEqual(values['n'], str(number))
-                    self.assertEqual(set(values), {'n', 'T'})
+                    self.assertEqual(set(values), {'n', 'budget digits', 'working digits', 'T'})
                     self.assertTrue(values['T'].startswith(('+', '-')))
                 with mp.workdps(40):
                     total = (mp.mpf(constant) if has_constant else mp.zero) + mp.fsum(
@@ -195,9 +197,9 @@ class TestModalExpansion(unittest.TestCase):
         self.assertIsNone(constant)
         self.assertTrue(records)
         self.assertIn('Modal summary:', text)
-        self.assertRegex(text, r'(?m)^estimated omitted-tail magnitude\s+= \S+$')
+        self.assertRegex(text, r'(?m)^estimated inclusive-tail bound\s+= \S+$')
         self.assertRegex(text, r'(?m)^threshold\s+= \S+$')
-        self.assertIn('Stopping criterion: heuristic', text)
+        self.assertIn('Tail bound is estimated, inclusive', text)
         self.assertNotIn('mode    1: term', text)
         output = io.StringIO()
         with redirect_stdout(output):
@@ -212,35 +214,39 @@ class TestModalExpansion(unittest.TestCase):
         constant, records = self.coefficient_records(
             '\n'.join(completed.stdout.splitlines()[:-1]),
             positive_count=True)
-        # Remove the final result string (not a diagnostic field) above.
+        # Remove the final returned value printed by the CLI.
         self.assertIsNone(constant)
         self.assertEqual(records[0]['n'], '1')
         self.assertEqual(completed.stdout.splitlines()[-1],
                          blockirwin(2, '01', 1, 10))
 
-    def test_numerical_stability_retry_and_clean_output(self):
-        # Discarded precision attempts must not leak output.
-        from modalirwin import _ModalNumericalInstability
-        attempts = []
-
-        def worker(*args, **kwargs):
-            guard = kwargs['_guard']
-            attempts.append(guard)
-            print(f'worker diagnostic at guard {guard}')
-            if guard < 36:
-                raise _ModalNumericalInstability('simulated cancellation')
-            return 'verified'
-
+    def test_decreasing_precision_and_diagnostics(self):
         output = io.StringIO()
-        with patch('modalirwin._modalirwin_once', side_effect=worker):
-            with redirect_stdout(output):
-                result = modalirwin(10, '314', 10, 10, verbose=True)
-        self.assertEqual(result, 'verified')
-        self.assertEqual(attempts, [12, 24, 36])
-        self.assertNotIn('worker diagnostic at guard 12', output.getvalue())
-        self.assertNotIn('worker diagnostic at guard 24', output.getvalue())
-        self.assertEqual(output.getvalue().count('worker diagnostic'), 1)
-        self.assertIn('Precision safeguard: restarted', output.getvalue())
+        with redirect_stdout(output):
+            result = modalirwin(2, '01', 0, 45, modalcoeffs=True,
+                                verbose=True)
+        self.assertEqual(result, blockirwin(2, '01', 0, 45))
+        _, records = self.coefficient_records(output.getvalue(),
+                                              positive_count=False)
+        budgets = [int(record['budget digits']) for record in records]
+        actual = [int(record['working digits']) for record in records]
+        self.assertTrue(any(value < 57 for value in budgets))
+        self.assertTrue(any(value < 57 for value in actual))
+        self.assertTrue(all(value >= 12 for value in budgets))
+        self.assertTrue(all(value >= budget for value, budget in zip(actual, budgets)))
+        self.assertIn('cache rebuilds', output.getvalue())
+
+    def test_raised_argument_signs_not_merged(self):
+        from mpmath import mp
+        from modalirwin import _ModalEngine
+        with mp.workdps(50):
+            engine = _ModalEngine(2, [1, 1], 3)
+            raised = engine._raised_arguments(2, 1)
+            self.assertTrue(all(pos >= 0 and neg >= 0 for pos, neg in raised.values()))
+            self.assertTrue(any(pos > 0 and neg > 0 for pos, neg in raised.values()))
+            term, _, positive, negative = engine.modal_term(2, 1, mp.mpf('1e-35'))
+            self.assertTrue(mp.almosteq(term, positive-negative,
+                                        rel_eps=mp.mpf('1e-30')))
 
     def test_early_stopping_and_verbose_layout(self):
         for digits in (20, 40):

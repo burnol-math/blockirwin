@@ -10,7 +10,7 @@ Independent Python + mpmath implementation produced by OpenAI GPT-6 on
 October 10, 2026.  This module coexists with the separate implementation
 in blockirwin.py, produced by Claude Opus 5.5 and Claude Sonnet 5.
 
-Modal stopping and cancellation checks are numerical heuristics, not certified bounds.
+The stopping test uses an estimated tail bound, not a certified bound.
 For usage, source references, tests and license see README-modalirwin.md.
 Licensed under CC BY-SA 4.0; see the repository LICENSE file.
 """
@@ -18,19 +18,12 @@ Licensed under CC BY-SA 4.0; see the repository LICENSE file.
 from __future__ import annotations
 
 from collections import defaultdict
-from contextlib import redirect_stdout
-from io import StringIO
-from math import comb
+from math import comb, ceil
 from operator import index
-import sys
 import time
 from mpmath import mp
 
-__version__ = '0.3.0'
-
-
-class _ModalNumericalInstability(ArithmeticError):
-    """A modal term needs more working precision."""
+__version__ = '0.5.0'
 
 
 def _print_fields(fields):
@@ -70,7 +63,9 @@ class _ModalEngine:
 
     Both base moment recurrences have diagonal D(b**(-m-1)); their
     off-diagonal coefficients use different word-overlap orientations.
-    All caches belong to one engine at one working precision.
+    Recurrence values cached at an earlier working precision are reused
+    as later modes lower their precision.  A precision retry constructs
+    a new engine rather than upgrading the cached numbers in place.
     """
 
     def __init__(self, b, word, ell, need_kempner=False):
@@ -84,19 +79,19 @@ class _ModalEngine:
         self.C1 = mp.fsum([mp.one] + [mp.power(b, -h) for h in self.overlaps])
         self.mass_u = b**self.p * self.C1
         self.mass_v = mp.mpf(b**self.p)
-        # Signed finite shift lists for the eta_0 and mu_0 recurrences.
+        # Signed shifts in the base-measure moment recurrences.
         self._vterms = self._terms(self.right)
         self._uterms = self._terms(self.left, left=True)
         self.v = [self.mass_v]
         self.u = [self.mass_u]
-        self.M = {}        # M[j] contains all computed moments of nu_j
-        self.R = [self.mass_v]  # Right coefficients: integrals of eigenpolynomials against eta_0.
-        self.U = [self.mass_u]  # Kempner counterparts against mu_0.
-        self._basis_gross = [(abs(self.mass_v), abs(self.mass_u))]
+        self.M = {}        # M[j] stores moments of the tilted measure nu_j.
+        self.R = [self.mass_v]  # Right modal coefficients for eta_0.
+        self.U = [self.mass_u]  # Kempner modal coefficients for mu_0.
         self._lams = {}
         self._diagonal = {}
         self._coefficient_rows = {}
         self._stats = defaultdict(int)
+        self._internal_loss = mp.zero
 
     def _terms(self, overlaps, left=False):
         base = [(1, a, -1) for a in range(self.b)]
@@ -109,15 +104,14 @@ class _ModalEngine:
         return base + tails
 
     def _de(self, row, col, which='v'):
-        """Return a recurrence coefficient, caching each row's shift powers."""
+        """Return a shift coefficient; extend its row cache as needed."""
         degree = row-col
         key = (which, row)
         cached = self._coefficient_rows.get(key)
         if cached is None:
             t = mp.power(self.b, -row-1)
             terms = self._vterms if which == 'v' else self._uterms
-            # The evaluation point depends on the row, not on the degree.
-            # Cache its weights, then extend the degree table on demand.
+            # The row fixes the shift weights; only the degree varies.
             weighted = [(integer, sign*t**length) for length, integer, sign in terms]
             initial_e = mp.fsum(weight for _, weight in weighted[self.b:])
             initial_d = mp.one + initial_e + mp.fsum(weight for _, weight in weighted[:self.b])
@@ -126,18 +120,13 @@ class _ModalEngine:
         d_values, e_values, weighted = cached
         while len(d_values) <= degree:
             d = len(d_values)
-            a_part = mp.zero
-            e_part = mp.zero
+            a_parts, e_parts = [], []
             for index, (integer, weight) in enumerate(weighted):
-                if integer == 0:
-                    continue
-                contribution = weight * integer**d
-                if index < self.b:
-                    a_part += contribution
-                else:
-                    e_part += contribution
-            d_values.append(a_part + e_part)
-            e_values.append(e_part)
+                if integer:
+                    contribution = weight*integer**d
+                    (a_parts if index < self.b else e_parts).append(contribution)
+            d_values.append(mp.fsum(a_parts + e_parts))
+            e_values.append(mp.fsum(e_parts))
         return d_values[degree], e_values[degree]
 
     def _D(self, exponent):
@@ -152,29 +141,44 @@ class _ModalEngine:
     def lam(self, j):
         if j not in self._lams:
             t = mp.power(self.b, -j)
-            C = mp.one+mp.fsum(t**h for h in self.overlaps)
+            overlap = mp.fsum(t**h for h in self.overlaps)
+            C = mp.one+overlap
             D = (1-self.b*t)*C+t**self.p
-            self._lams[j] = ((1-self.b*t)*(C-1)+t**self.p)/D
+            self._lams[j] = ((1-self.b*t)*overlap+t**self.p)/D
         return self._lams[j]
+
+    def _signed_sum(self, values):
+        """Sum by sign and track the largest local cancellation indicator."""
+        positives, negatives = [], []
+        for x in values:
+            if x > 0:
+                positives.append(x)
+            elif x < 0:
+                negatives.append(-x)
+        plus, minus = mp.fsum(positives), mp.fsum(negatives)
+        result = plus-minus
+        if plus and minus:
+            loss = mp.log10((plus+minus)/abs(result)) if result else mp.inf
+            self._internal_loss = max(self._internal_loss, loss)
+        return result
 
     def _extend_basic(self, order):
         """Extend eta_0 moments and, only for k=0, autonomous mu_0 moments."""
         for m in range(len(self.v), order+1):
             d0 = self._D(m+1)
-            vtotal = mp.zero
-            utotal = mp.zero
+            vs, us = [], []
             for i in range(m):
                 factor = comb(m,i)
                 dv, _ = self._de(m,i,'v')
-                vtotal += factor*dv*self.v[i]
+                vs.append(factor*dv*self.v[i])
                 if self.need_kempner:
                     du, _ = self._de(m,i,'u')
-                    utotal += factor*du*self.u[i]
-            self.v.append(-vtotal/d0)
+                    us.append(factor*du*self.u[i])
+            self.v.append(-self._signed_sum(vs)/d0)
             if self.need_kempner:
                 forcing = mp.fsum(mp.power(self.b, -(m+1)*h)*(value**m)
                                   for h,value in self.left)
-                self.u.append((forcing-utotal)/d0)
+                self.u.append(self._signed_sum([forcing] + [-x for x in us])/d0)
             self._stats['basic_moments'] += 1
 
     def _mom(self, j, q):
@@ -184,113 +188,112 @@ class _ModalEngine:
         while len(moments) <= q:
             r = len(moments)
             row = j+r-1
-            numerator = mp.zero
+            summands = []
             for i in range(r):
                 col = j+i-1
                 d, e = self._de(row,col)
-                numerator += comb(r,i)*(e-lamj*d)*moments[i]
+                summands.append(comb(r,i)*(e-lamj*d)*moments[i])
             denominator = self._D(j+r)*(lamj-self.lam(j+r))
-            moments.append(numerator/denominator)
+            moments.append(self._signed_sum(summands)/denominator)
             self._stats['nu_moments'] += 1
         return moments[q]
 
     def _basis_coefficients(self, m):
-        """Obtain modal right coefficients from monomial base moments."""
+        """Build right coefficients and, for Kempner sums, left ones."""
         self._extend_basic(m)
         while len(self.R) <= m:
             index = len(self.R)
-            total_R = mp.zero
-            total_U = mp.zero
-            gross_R = abs(self.v[index])
-            gross_U = abs(self.u[index]) if self.need_kempner else mp.zero
+            r_parts = [self.v[index]]
+            u_parts = [self.u[index]] if self.need_kempner else []
             for i in range(index):
                 c = comb(index,i)*self._mom(i+1,index-i)
-                summand_R = c*self.R[i]
-                total_R += summand_R
-                gross_R += abs(summand_R)
+                r_parts.append(-c*self.R[i])
                 if self.need_kempner:
-                    summand_U = c*self.U[i]
-                    total_U += summand_U
-                    gross_U += abs(summand_U)
-            # Record gross coefficient magnitudes for cancellation checks.
-            self._basis_gross.append((gross_R, gross_U))
-            self.R.append(self.v[index]-total_R)
+                    u_parts.append(-c*self.U[i])
+            self.R.append(self._signed_sum(r_parts))
             if self.need_kempner:
-                self.U.append(self.u[index]-total_U)
+                self.U.append(self._signed_sum(u_parts))
         return self.R[m], self.U[m] if self.need_kempner else None
 
     def _raised_arguments(self, j, initial):
-        """Raise auxiliary A_j arguments to at least b**(ell-1).
+        """Raise Stieltjes arguments, retaining both signs separately.
 
-        Applies the finite identity (Ajnlevelraising) from Part 2,
-        merging repeated arguments and preserving signed weights.
+        At each raised argument, positive and negative weights are kept
+        apart until linear_A measures their cancellation.
         """
-        counts = defaultdict(lambda: mp.zero)
-        counts[int(initial)] = mp.one
+        counts = defaultdict(lambda: [mp.zero, mp.zero])
+        counts[int(initial)][0] = mp.one
         cutoff = self.b**(self.ell-1)
         lam = self.lam(j)
         c = (1-lam)/lam
+
+        def add(n, contribution):
+            if contribution > 0:
+                counts[n][0] += contribution
+            elif contribution < 0:
+                counts[n][1] -= contribution
+
         while True:
-            small = [(n, coeff) for n, coeff in counts.items()
-                     if n < cutoff and coeff]
+            small = [n for n, (pos, neg) in counts.items()
+                     if n < cutoff and (pos or neg)]
             if not small:
                 break
-            n = min(n for n, _ in small)
-            coeff = counts.pop(n)
-            for a in range(self.b):
-                counts[self.b*n+a] += coeff
-            for h, suffix in self.right:
-                counts[self.b**h*n+suffix] += coeff*c
+            n = min(small)
+            pos, neg = counts.pop(n)
+            for coeff in (pos, -neg):
+                if not coeff:
+                    continue
                 for a in range(self.b):
-                    counts[self.b**(h+1)*n+a*self.b**h+suffix] -= coeff*c
-            counts[self.b**self.p*n+self.nw] += coeff*c
-        return {n: coeff for n, coeff in counts.items() if coeff}
+                    add(self.b*n+a, coeff)
+                for h, suffix in self.right:
+                    add(self.b**h*n+suffix, coeff*c)
+                    for a in range(self.b):
+                        add(self.b**(h+1)*n+a*self.b**h+suffix, -coeff*c)
+                add(self.b**self.p*n+self.nw, coeff*c)
+        return {n: (pos, neg) for n, (pos, neg) in counts.items()
+                if pos or neg}
 
     def linear_A(self, j, arguments, tolerance):
-        """Evaluate an A_j combination and its positive/negative totals.
+        """Evaluate Newton sums after sign-separated level raising.
 
-        All signed Newton contributions are classified *before* their
-        cancellation.  This permits a per-modal-term cancellation check.
-        The omitted-row tolerance remains heuristic.
+        Raised weights are netted after their cancellation is recorded;
+        Newton-series contributions are then accumulated by sign.
         """
         raised_plus = defaultdict(lambda: mp.zero)
         raised_minus = defaultdict(lambda: mp.zero)
         for n, coeff in arguments.items():
             if not coeff:
                 continue
-            for N, rcoeff in self._raised_arguments(j,n).items():
-                contribution = coeff*rcoeff
-                if contribution >= 0:
-                    raised_plus[N] += contribution
+            for N, (pos, neg) in self._raised_arguments(j, n).items():
+                if coeff > 0:
+                    raised_plus[N] += coeff*pos
+                    raised_minus[N] += coeff*neg
                 else:
-                    raised_minus[N] -= contribution
-        # Do not cancel these contributions before measuring their sizes.
-        # The net coefficients are needed only for the Newton cutoff test.
-        raised = {N: raised_plus[N]-raised_minus[N]
+                    raised_plus[N] -= coeff*neg
+                    raised_minus[N] -= coeff*pos
+        # Track cancellation before forming the net raised weights.
+        raised = {N: self._signed_sum([raised_plus[N], -raised_minus[N]])
                   for N in raised_plus.keys() | raised_minus.keys()}
         if not raised:
             return mp.zero, mp.zero, mp.zero
-        powers = {N: mp.power(N,-j) for N in raised}
+        powers = {N: mp.power(N, -j) for N in raised}
         positives, negatives = [], []
         q = 0
         while True:
-            binomial = comb(j+q-1,q)
-            moment = self._mom(j,q)
-            signed_factor = (-1 if q%2 else 1)*binomial*moment
-            # Evaluate signed contributions at the engine precision.
-            for N in raised:
-                positive_part = signed_factor*raised_plus[N]*powers[N]
-                negative_part = -signed_factor*raised_minus[N]*powers[N]
-                for contribution in (positive_part, negative_part):
-                    if contribution >= 0:
-                        positives.append(contribution)
-                    else:
-                        negatives.append(-contribution)
+            binomial = comb(j+q-1, q)
+            moment = self._mom(j, q)
+            signed_factor = (-1 if q % 2 else 1)*binomial*moment
+            for N, weight in raised.items():
+                contribution = signed_factor*weight*powers[N]
+                if contribution >= 0:
+                    positives.append(contribution)
+                else:
+                    negatives.append(-contribution)
             self._stats['newton_rows'] += 1
             for N in powers:
                 powers[N] /= N
             q += 1
-            omitted = comb(j+q-1,q)*mp.fsum(abs(raised[N])*abs(powers[N])
+            omitted = comb(j+q-1, q)*mp.fsum(abs(raised[N])*abs(powers[N])
                                                 for N in raised)
             if omitted < tolerance:
                 break
@@ -360,14 +363,26 @@ class _ModalEngine:
         return term, None, positive, negative
 
 
-def _modalirwin_once(b: int, w, k: int, nboffigures: int = 100,
+def _precision_for_term(magnitude, scale, full_dps):
+    """Next-mode precision budget before cancellation adjustments."""
+    if not magnitude:
+        return 12
+    return max(12, min(full_dps, int(ceil(full_dps +
+                 min(mp.zero, mp.log10(magnitude/scale))))))
+
+
+def _modalirwin_once(b: int, w, k: int, nboffigures=100,
                      ell=None, verbose=False, trunc=False, *, max_modes=1000,
                      modalcoeffs=False, _guard=12) -> str:
-    """Run one calculation with the given decimal guard precision."""
+    """Evaluate modes with size-based budgets and selective retries.
+
+    The stopping test uses a numerical tail indicator, not a certified
+    remainder bound; max_modes and retry limits can raise ArithmeticError.
+    """
     if int(b) != b or b < 2:
         raise ValueError('b must be an integer >= 2')
     b = int(b)
-    digits = _digits(b,w)
+    digits = _digits(b, w)
     if int(k) != k or k < 0:
         raise ValueError('k must be a nonnegative integer')
     k = int(k)
@@ -387,99 +402,141 @@ def _modalirwin_once(b: int, w, k: int, nboffigures: int = 100,
         return '0'
 
     started = time.perf_counter()
-    # Each attempt uses its supplied decimal guard precision.
     full_dps = nboffigures + _guard
+    decreasing_precision = nboffigures > 30
     terms = []
     decreasing_run = 0
-    cancellation_max = 0
+    cancellation_max = mp.zero
+    retries = 0
+    minimum_dps = full_dps
+    maximum_dps = full_dps
+    previous_internal_loss = mp.zero
+    previous_work_dps = full_dps
+    full_cache_required = False
+    cache_rebuilds = 0
+    suffix_precision_floor = 0
     with mp.workdps(full_dps):
-        # A modal term is undetectable relative to the natural scale
-        # b**len(w) * log(b) at requested figures plus twelve digits.
-        scale = mp.power(b, len(digits)) * mp.log(b)
-        target = scale * mp.power(10, -(nboffigures+12))
-        engine = _ModalEngine(b,digits,ell,need_kempner=(k == 0))
+        scale = mp.power(b, len(digits))*mp.log(b)
+        target = scale*mp.power(10, -full_dps)
+        engine = _ModalEngine(b, digits, ell, need_kempner=(k == 0))
         answer = mp.zero
         if k == 0 and all(x == 0 for x in digits):
-            constant = mp.fsum(mp.one/a for a in range(1,b))
+            constant = mp.fsum(mp.one/a for a in range(1, b))
             answer += constant
             if modalcoeffs:
                 _print_fields([('constant', mp.nstr(constant, nboffigures))])
                 print()
-        # Recurrences and Newton contributions use one working precision.
-        for j in range(1,max_modes+1):
-            # Scale the Newton-series cutoff to this modal contribution.
-            term, factors, positive, negative = engine.modal_term(
-                j, k, target/(100 if j == 1 else 10),
-                modalcoeffs=modalcoeffs)
-            magnitude = abs(term)
-            # Estimate lost decimal digits from positive and negative
-            # components of THIS mode only, not from other modal terms.
-            gross = positive+negative
-            # The right/left factors are themselves built by subtractive
-            # recurrences.  Include cancellation in these factors when
-            # estimating the precision needed for this one modal term.
-            if j > 1:
-                R, U = engine.R[j-1], (engine.U[j-1] if k == 0 else None)
-                gross_R, gross_U = engine._basis_gross[j-1]
-                if k >= 1:
-                    if R:
-                        gross *= max(mp.one, gross_R/abs(R))
-                    elif gross_R:
-                        gross = mp.inf
+        for j in range(1, max_modes+1):
+            budget = (_precision_for_term(abs(terms[-1]), scale, full_dps)
+                      if terms and decreasing_precision else full_dps)
+            work_dps = max(budget, suffix_precision_floor)
+            if decreasing_precision and terms:
+                if mp.isfinite(previous_internal_loss):
+                    work_dps = min(previous_work_dps, full_dps, budget +
+                                   max(0, int(ceil(previous_internal_loss))) + 4)
                 else:
-                    coeff_amplification = mp.one
-                    if U and gross_U:
-                        coeff_amplification = max(coeff_amplification,
-                                                  gross_U/abs(U))
-                    elif gross_U:
-                        gross = mp.inf
-                    if R and gross_R:
-                        coeff_amplification = max(coeff_amplification,
-                                                  gross_R/abs(R))
-                    elif gross_R:
-                        gross = mp.inf
-                    gross *= coeff_amplification
-            loss = (max(mp.zero, mp.log10(gross/magnitude))
-                    if magnitude and gross else
-                    (mp.inf if gross else mp.zero))
+                    work_dps = full_dps
+            if full_cache_required:
+                work_dps = max(full_dps, suffix_precision_floor)
+            elif work_dps > previous_work_dps:
+                # A precision increase cannot improve cached low-precision
+                # dependencies. Rebuild at full precision and keep it.
+                full_cache_required = True
+                work_dps = full_dps
+                with mp.workdps(work_dps):
+                    engine = _ModalEngine(b, digits, ell,
+                                          need_kempner=(k == 0))
+                cache_rebuilds += 1
+            local_retries = 0
+            growth_rechecked = False
+            while True:
+                # Cache values have the precision of the attempt that
+                # originally computed them; a retry uses a fresh engine.
+                engine._internal_loss = mp.zero
+                with mp.workdps(work_dps):
+                    term, factors, positive, negative = engine.modal_term(
+                        j, k, target/(100 if j == 1 else 10),
+                        modalcoeffs=modalcoeffs)
+                    gross = positive+negative
+                    magnitude = abs(term)
+                    loss = (mp.log10(gross/magnitude) if gross and magnitude
+                            else (mp.inf if gross else mp.zero))
+                    loss = max(loss, engine._internal_loss)
+                    # Estimate cancellation in this term and in its
+                    # recurrences before deciding whether to retry.
+                    if mp.isfinite(loss) and magnitude:
+                        # A smaller contribution admits a lower absolute
+                        # accuracy budget, before accounting for cancellation.
+                        needed = max(budget, int(ceil(
+                            nboffigures + _guard + mp.log10(magnitude/scale) + loss)))
+                    elif gross:
+                        needed = max(work_dps, full_dps)
+                    else:
+                        needed = budget
+                    if terms and magnitude > abs(terms[-1]) and not growth_rechecked:
+                        # Recheck an unexpectedly larger mode with fresh
+                        # dependencies: its growth could be numerical.
+                        extra_growth = (max(1, int(ceil(loss)))
+                                        if mp.isfinite(loss) else 12)
+                        needed = max(needed, work_dps+extra_growth)
+                        growth_rechecked = True
+                    # Guard against a small net term arising from large
+                    # opposite-sign contributions at insufficient precision.
+                    rounding_proxy = gross*mp.power(10, -work_dps)
+                    if rounding_proxy >= target and magnitude < target:
+                        needed = max(needed, work_dps + max(1, int(ceil(
+                            mp.log10(rounding_proxy/target)))+2))
+                if (decreasing_precision and not full_cache_required and
+                        (not mp.isfinite(engine._internal_loss) or
+                         work_dps-engine._internal_loss < 12)):
+                    # Unresolved internal cancellation at reduced precision
+                    # requires rebuilding from the original precision.
+                    full_cache_required = True
+                    needed = max(needed, full_dps)
+                if needed <= work_dps:
+                    break
+                if local_retries >= 4 or needed > full_dps+120:
+                    raise ArithmeticError(
+                        f'mode {j}: cancellation requires excessive precision')
+                work_dps = max(work_dps+1, needed)
+                retries += 1
+                local_retries += 1
+                with mp.workdps(work_dps):
+                    engine = _ModalEngine(b, digits, ell, need_kempner=(k == 0))
+                cache_rebuilds += 1
+            if work_dps > full_dps:
+                # Keep the higher precision for subsequent cached work.
+                suffix_precision_floor = max(suffix_precision_floor, work_dps)
+            previous_internal_loss = engine._internal_loss
+            previous_work_dps = work_dps
+            minimum_dps = min(minimum_dps, work_dps)
+            maximum_dps = max(maximum_dps, work_dps)
             cancellation_max = max(cancellation_max, loss)
-            # With d working decimal digits, unresolved rounding is on
-            # the scale of gross*10**(-d), even if term rounds to zero.
-            # This is a numerical heuristic, not an interval error bound.
-            rounding_proxy = gross*mp.power(10, -full_dps)
-            if (gross and rounding_proxy >= target and
-                    (magnitude < target or loss > _guard-2)):
-                raise _ModalNumericalInstability(
-                    f'mode {j}: positive/negative cancellation '
-                    f'requires more than {_guard} guard digits')
             if terms:
                 decreasing_run = (decreasing_run+1 if
                                   magnitude < abs(terms[-1]) else 0)
-                # An isolated upward movement is not by itself evidence of
-                # instability; repeated nondecrease without meeting the
-                # stopping rule is handled by a bounded mode limit.
-            # For an unresolved cancellation smaller than the threshold,
-            # rounding_proxy < target is essential before treating it as
-            # negligible.  Do not mistake an inaccurate zero for evidence.
+            # Add the accepted term at the full accumulator precision.
             answer += term
             terms.append(term)
-            # Heuristic proxy for the entire omitted tail: twice the
-            # most recent term's magnitude.  Not a rigorous error bound.
-            omitted_tail_estimate = 2 * abs(term)
+            tail_bound = 2*magnitude
             if modalcoeffs:
                 if j > 1:
                     print()
-                signed_term = ('+' if term >= 0 else '') + mp.nstr(term, nboffigures)
-                fields = [('n', j)]
+                shown = min(nboffigures, max(2, work_dps-12))
+                signed_term = ('+' if term >= 0 else '') + mp.nstr(term, shown)
+                fields = [('n', j), ('budget digits', budget),
+                          ('working digits', work_dps)]
                 if k >= 1:
                     lam, left, right = factors
-                    product = left*right
+                    with mp.workdps(work_dps):
+                        product = left*right
+                        prime = product/lam
                     fields.extend([
-                        ('lambda', mp.nstr(lam, nboffigures)),
-                        ('L', mp.nstr(left, nboffigures)),
-                        ('R', mp.nstr(right, nboffigures)),
-                        ('C', mp.nstr(product, nboffigures)),
-                        ("C'", mp.nstr(product/lam, nboffigures)),
+                        ('lambda', mp.nstr(lam, shown)),
+                        ('L', mp.nstr(left, shown)),
+                        ('R', mp.nstr(right, shown)),
+                        ('C', mp.nstr(product, shown)),
+                        ("C'", mp.nstr(prime, shown)),
                     ])
                 fields.append(('T', signed_term))
                 _print_fields(fields)
@@ -489,7 +546,8 @@ def _modalirwin_once(b: int, w, k: int, nboffigures: int = 100,
                 _print_fields([
                     ('mode', j),
                     ('term', mp.nstr(term, 12)),
-                    ('|term|', mp.nstr(abs(term), 5)),
+                    ('|term|', mp.nstr(magnitude, 5)),
+                    ('working digits', work_dps),
                 ])
             if (j >= 3 and decreasing_run >= 2 and
                     2*(magnitude+rounding_proxy) < target):
@@ -510,64 +568,42 @@ def _modalirwin_once(b: int, w, k: int, nboffigures: int = 100,
                 ('cached coefficient rows', len(engine._coefficient_rows)),
                 ('Newton rows', engine._stats['newton_rows']),
                 ('maximum modal cancellation digits', mp.nstr(cancellation_max, 5)),
+                ('local precision retries', retries),
+                ('cache rebuilds', cache_rebuilds),
                 ('elapsed time', f'{time.perf_counter()-started:.3f}s'),
-                ('estimated omitted-tail magnitude',
-                 mp.nstr(omitted_tail_estimate, 5)),
+                ('estimated inclusive-tail bound', mp.nstr(tail_bound, 5)),
                 ('working decimal digits', full_dps),
+                ('minimum modal decimal digits', minimum_dps),
+                ('maximum modal decimal digits', maximum_dps),
                 ('guard decimal digits', _guard),
                 ('successive decreases', decreasing_run),
                 ('reference scale', mp.nstr(scale, 6)),
                 ('threshold', mp.nstr(target, 5)),
             ])
-            print('Stopping criterion: heuristic (NOT a certified error bound)')
+            print('Tail bound is estimated, inclusive of the last term.')
     return result
-
 
 
 def modalirwin(b: int, w, k: int, nboffigures: int = 100,
                ell=None, verbose=False, trunc=False, *, max_modes=1000,
                modalcoeffs=False) -> str:
-    """Compute I(b,w,k) using the published modal expansion.
+    """Compute I(b,w,k) using Burnol's published modal expansion.
 
-    The positional interface matches ``blockirwin``; return a decimal
-    string of ``nboffigures`` significant figures.  ``ell`` controls
-    level raising of auxiliary modal Stieltjes arguments, not the level
-    setting of the other method.  ``modalcoeffs`` prints signed mode
-    terms and, for k >= 1, lambda, L, R, C and C' (mode n starts at 1).
-    ``max_modes`` limits the number of terms; reaching it raises
-    ArithmeticError.
+    Return ``nboffigures`` decimal significant figures. ``ell`` sets the
+    auxiliary level-raising threshold.  ``modalcoeffs`` prints modal terms
+    and, for k >= 1, their coefficient factors and per-mode precisions.
 
-    Stop after three consecutive term magnitudes in strict descent and once
-    the tail proxy is below b**len(w)*log(b)*10**(-nboffigures-12).
-    Each term has separate positive and negative Newton contributions;
-    substantial unresolved cancellation triggers fresh-cache retries at
-    12, 24, 36, ... decimal guard digits. All error indicators and the
-    modal tail criterion remain heuristic, not certified bounds.
+    Above 30 requested digits, the preceding mode sets a size-based
+    precision budget for the next mode, relative to b**len(w)*log(b).
+    Cancellation checks can override that budget and rebuild the cache.
+    The stopping threshold includes twelve decimal guard digits.
+    Cancellation and tail indicators estimate accuracy but do not certify
+    twelve correct guard digits or provide a rigorous remainder bound.
+    The estimated tail bound includes the final computed term.
     """
-    # Each attempt owns an independent recurrence cache. Suppress output from
-    # unsuccessful attempts, so displayed modes always belong to one run.
-    guard = 12
-    max_guard = 240
-    while guard <= max_guard:
-        output = StringIO()
-        try:
-            with redirect_stdout(output):
-                result = _modalirwin_once(
-                    b, w, k, nboffigures, ell, verbose, trunc,
-                    max_modes=max_modes, modalcoeffs=modalcoeffs, _guard=guard)
-        except _ModalNumericalInstability as exc:
-            if guard == max_guard:
-                raise ArithmeticError(
-                    f'modal calculation remained unstable at '
-                    f'{max_guard} guard digits') from exc
-            guard += 12
-            continue
-        if verbose and guard > 12:
-            print('Precision safeguard: restarted calculation')
-            _print_fields([('guard decimal digits', guard)])
-        sys.stdout.write(output.getvalue())
-        return result
-    raise AssertionError('unreachable precision-retry state')
+    return _modalirwin_once(
+        b, w, k, nboffigures, ell, verbose, trunc,
+        max_modes=max_modes, modalcoeffs=modalcoeffs)
 
 
 if __name__ == '__main__':

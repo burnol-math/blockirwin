@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Compare the independent methods in blockirwin.py and modalirwin.py.
+"""Compare outputs and call times of two independent numerical methods.
 
 Produced by OpenAI GPT-6 on October 10, 2026, from J.-F. Burnol's
 mathematics; see README-modalirwin.md and the CC BY-SA 4.0 LICENSE.
@@ -18,12 +18,12 @@ from modalirwin import modalirwin
 
 
 def compare_irwin(b, w, k, nboffigures=30, ell=None, *, verbose=False):
-    """Print both results, independent timings, and printed-value difference.
+    """Print both results and their separately measured call durations.
 
-    Return a dictionary of numerical strings and elapsed seconds. ``ell``
-    defaults independently for each method; an explicit value applies to
-    different auxiliary level-raising mechanisms in the two implementations.
-    Timing includes each method's requested significant-figure calculation.
+    Return decimal strings, elapsed seconds, and their absolute difference
+    as a formatted string. An explicit ``ell`` is passed to both methods,
+    although they use it for different auxiliary level-raising operations.
+    Timings exclude imports and are not repeated benchmark medians.
     """
     started = time.perf_counter()
     classical = blockirwin(b, w, k, nboffigures, ell, verbose=verbose)

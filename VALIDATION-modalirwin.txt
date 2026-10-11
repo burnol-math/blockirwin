@@ -1,0 +1,33 @@
+Modalirwin revision 0.5.0 -- validation record, 2026-10-11
+
+Validated code: modalirwin.py in the accompanying archive.
+Environment: Python 3.13, mpmath 1.3.0.
+
+Eight targeted unit/regression tests: PASS (19.397 s total).
+See final_tests.log.
+
+20-digit binary matrix: 20/20 matched blockirwin.py, including
+00, 11, and all length-three binary words with k=0,1.
+See binary_test.log (20 cases, with individual function timings).
+
+40 digits, word 01, k=0:
+  Original modalirwin.py (version 0.3.0)  2.204 s
+  Revised modalirwin.py (version 0.5.0)  2.703 s
+  Independent blockirwin.py            0.002 s
+  Matching results; revised min working precision 47, max 52.
+
+60 digits, word 01, k=0:
+  Original modalirwin.py (version 0.3.0)  6.087 s
+  Revised modalirwin.py (version 0.5.0)  7.387 s
+  Independent blockirwin.py            0.003 s
+  Matching results; revised min working precision 63, max 72.
+
+60 digits, word 11, k=1:
+  Original modalirwin.py (version 0.3.0)  5.239 s
+  Revised modalirwin.py (version 0.5.0)  4.727 s
+  Independent blockirwin.py            0.008 s
+  Matching results; all modes ran at 72 working digits.
+
+Single-run timings, not statistically repeated.
+The full 40/60-digit binary matrix remains UNVERIFIED.
+Code is not demonstrated to improve speed in general; some cases regress.

@@ -38,6 +38,16 @@ Methods:
 3. *Uncertain, may never be done:* modal expansions applied once a
    certain level has been reached.
 
+**Performance and dependence on `k`.** `blockirwin.py` (method 1)
+becomes more costly as `k` grows. In contrast,
+`modalirwin.py` becomes faster with increasing `k`.
+For example, at `b=10`, `w="314"`, 40 digits,
+measured calls to `blockirwin.py` took 0.0124 s (`k=1`) versus 0.0234 s
+(`k=10`), while `modalirwin.py` 0.5.0 took 0.277 s versus 0.0045 s.
+This is an illustration, not a universal ordering: method 1 often wins
+(by one order of magnitude at least)
+for small `k`, and both costs depend on the word, base, and precision.
+
 
 ## Usage and validation
 
@@ -55,14 +65,8 @@ python compare_modalirwin.py 2 01 0 20
 python -m pytest -q test_modalirwin.py test_blockirwin.py
 ```
 
-The modules only use Python + `mpmath`
-
-Regarding `modalirwin.py`, the numeric stopping policy, including a crude
-estimate for the first omitted modal term and reduced precision for small
-Newton rows, is heuristic, not a rigorous accuracy certificate.  The modal
-method may be slower on some parameters.  `max_modes` raises an error rather
-than quietly claiming accuracy when convergence is too slow. A detected
-numerical instability triggers fresh-cache retries at higher precision.
+The modules use Python's standard library and `mpmath`.
+See some comments about `mpmath` version at bottom of `README-method1.md`.
 
 
 ## AI assistance
@@ -72,14 +76,15 @@ and this `README.md`'s original version were produced on September 28–29, 2026
 by Claude Opus 5.5 and Claude Sonnet 5 (Anthropic), from the mathematics
 and earlier Maple/SageMath/mpmath code of Jean-François Burnol.
 
-The complementary `modalirwin.py`, `test_modalirwin.py` and
-`compare_modalirwin.py` were produced with OpenAI ChatGPT (GPT-6) on October
-10, 2026, from the two Burnol preprints.  This `README.md` was extended to
-cover this, and then edited by a human, to prune some too lengthy ChatGPT
-output.
+The complementary `modalirwin.py`, and other files inclusive of
+`test_modalirwin.py` and `compare_modalirwin.py` were produced with OpenAI
+ChatGPT (GPT-6) on October 10--11, 2026, from the two Burnol preprints.
 
-The 
-mathematics is fully authored by Jean-François Burnol. It was parsed
+This `README.md` was extended by ChatGPT (GPT-6) to cover this, and then
+edited (twice: on October 10 and again on October 11) by a human, to prune
+some too lengthy (and **too heavily decorated** like this) ChatGPT outputs.
+
+The mathematics is fully authored by Jean-François Burnol. It was parsed
 by ChatGPT 5.6 Sol to search for errors (and improve the English language use).
 
 The repository is licensed
