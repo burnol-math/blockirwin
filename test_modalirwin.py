@@ -236,14 +236,41 @@ class TestModalExpansion(unittest.TestCase):
         self.assertTrue(all(value >= budget for value, budget in zip(actual, budgets)))
         self.assertIn('cache rebuilds', output.getvalue())
 
-    def test_raised_argument_signs_not_merged(self):
+    def test_raised_table_matches_direct_raising(self):
         from mpmath import mp
-        from modalirwin import _ModalEngine
+        from modalirwin import _ModalEngine, _raised_table, _horner
         with mp.workdps(50):
+            for b, word, ell, j in ((2, [1, 1], 3, 2), (2, [1, 0, 1], 5, 3),
+                                    (3, [1, 2, 1, 2], 4, 2)):
+                engine = _ModalEngine(b, word, ell)
+                lam = engine.lam(j)
+                c = (1-lam)/lam
+                # Direct raising with numerical weights, one argument at a time.
+                weights = {1: mp.one}
+                cutoff = b**(ell-1)
+                while any(n < cutoff for n in weights):
+                    n = min(x for x in weights if x < cutoff)
+                    x = weights.pop(n)
+                    children = [(b*n+a, x) for a in range(b)]
+                    for h, suffix in engine.right:
+                        children.append((b**h*n+suffix, x*c))
+                        children += [(b**(h+1)*n+a*b**h+suffix, -x*c)
+                                     for a in range(b)]
+                    children.append((b**len(word)*n+engine.nw, x*c))
+                    for N, y in children:
+                        weights[N] = weights.get(N, mp.zero)+y
+                table = _raised_table(b, tuple(word), ell, ((1, (1,)),))
+                exact = {N: _horner(pos, c)-_horner(neg, c)
+                         for N, pos, neg in table}
+                self.assertTrue(all(N >= cutoff for N in exact))
+                self.assertTrue(all(isinstance(x, int)
+                                    for _, pos, neg in table for x in pos+neg))
+                for N in set(weights) | set(exact):
+                    self.assertTrue(mp.almosteq(weights.get(N, mp.zero),
+                                                exact.get(N, mp.zero),
+                                                rel_eps=mp.mpf('1e-40'),
+                                                abs_eps=mp.mpf('1e-40')))
             engine = _ModalEngine(2, [1, 1], 3)
-            raised = engine._raised_arguments(2, 1)
-            self.assertTrue(all(pos >= 0 and neg >= 0 for pos, neg in raised.values()))
-            self.assertTrue(any(pos > 0 and neg > 0 for pos, neg in raised.values()))
             term, _, positive, negative = engine.modal_term(2, 1, mp.mpf('1e-35'))
             self.assertTrue(mp.almosteq(term, positive-negative,
                                         rel_eps=mp.mpf('1e-30')))

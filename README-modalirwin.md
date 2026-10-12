@@ -41,6 +41,18 @@ in `blockirwin.py`. The latter, its original test suite, and
 (Anthropic) on September 28–29, 2026, using Professor Burnol's work.
 The implementations are complementary, not replacements for each other.
 
+On October 12, 2026, Claude Opus 5.5 (Anthropic) revised `modalirwin.py`
+into version 0.6.0.  The auxiliary level raising, previously redone for
+every mode and every initial argument with a scan of all arguments at each
+step, is now built once per call as polynomials with integer coefficients
+in $c=(1-\lambda_j)/\lambda_j$, evaluated for each mode.  Exact
+cancellations, which were counted as an infinite loss of digits and forced
+full precision in all modes, no longer occur.  The Newton stopping test
+reuses the per-row sums, and the default levels were changed (see the API
+table).  The test `test_raised_argument_signs_not_merged` of
+`test_modalirwin.py`, which checked the former design, was replaced by
+`test_raised_table_matches_direct_raising`.
+
 This contribution and the repository are distributed under the existing
 **Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)**
 license. The full legal text is in [`LICENSE`](LICENSE); see also
@@ -74,7 +86,7 @@ The result is a **decimal string**, compatible with the return format of
 | `w` | Nonempty word: a digit string for bases up to 36, or a sequence of integer digits for any base |
 | `k` | Number of occurrences, an integer at least 0 |
 | `nboffigures` | Requested number of significant figures, at least 6 (default 100) |
-| `ell` | Minimum number of base-`b` digits in the **auxiliary modal Stieltjes arguments** after level raising; default 3 in base 2 and 2 otherwise |
+| `ell` | Minimum number of base-`b` digits in the **auxiliary modal Stieltjes arguments** after level raising; default 5 in base 2, 4 in base 3, 3 in base 4 and 2 otherwise |
 | `verbose` | Print per-mode magnitudes, recurrence counts, timings, and the heuristic stopping indicator |
 | `trunc` | Truncate the decimal result rather than round it |
 | `max_modes` | Maximum modal indices to evaluate; raise `ArithmeticError` if no stopping decision is obtained |
@@ -208,6 +220,18 @@ moments extends triangular recurrences and Newton series, and cancellation
 can require additional precision or a fresh cache.  Thus two separate
 costs matter: the **number of modes** and the **cost per mode**.
 
+Heuristically, the coefficient of mode $m$ uses the moments of orders
+$1,\dots,m$ of the tilted measures $\nu_m,\dots,\nu_1$, and a moment of
+order $r$ comes from a recurrence over all lower orders.  With $M$ modes
+this is about $M^2/2$ moments and $M^3/6$ operations, whatever the level
+`ell`; in version 0.6.0 this took about two thirds of the time for binary
+`11`, `k=1`, at 40 digits.  For $k\ge1$ mode $j$ carries the factor
+$\lambda_j^{k-1}$, so fewer modes are needed as $k$ grows: for binary `01`
+and `11` at 40 digits, $M(k+1)$ stayed within 3% for each word, for
+$k=1,3,5,10$.
+Hence the modal expansion is costly for small `k`, and fast for large
+`k`, when a few modes beyond $b^p\log b$ suffice.
+
 For example, the following are single-run measurements of a recent
 working revision of `modalirwin.py`, in base 2, at **20 requested
 significant digits** (CPython 3.13.5, `mpmath` 1.3.0). Times measure the function call,
@@ -275,6 +299,13 @@ were 0.0124 s and 0.0234 s for method 1 (`k=1` and `k=10`), versus
 0.277 s and 0.0045 s for `modalirwin.py` 0.5.0. These measurements
 illustrate contrasting trends, not a general monotonicity theorem.
 
+With 0.6.0 and on another, slower, hardware (best of three runs,
+October 12, 2026, CPython 3.13.16, `mpmath` 1.4.1), the same example
+gave 0.026 s and 0.039 s for method 1 (`k=1` and `k=10`), versus
+0.305 s and 0.0071 s for `modalirwin.py`; both methods returned the
+same decimal strings.  On this hardware `blockirwin.py` ran about
+1.7 to 2 times slower than in the earlier timings.
+
 For ordinary decimal examples at **100 significant digits**, previous
 single-run comparisons of `modalirwin.py` 0.3.0 and 0.5.0 gave:
 
@@ -291,6 +322,19 @@ The modified solver's minimum working precision fell from its initial
 code was about 21% slower than 0.3.0, despite reducing precision.
 These are historical measurements, **not new benchmarks**; neither
 algorithm is universally faster.
+
+Version 0.6.0, single runs on October 12, 2026 (CPython 3.13.16,
+`mpmath` 1.4.1, another machine than the tables above), all agreeing
+with `blockirwin.py`; times in seconds, modes in parentheses:
+
+| Base, word | Digits | `k=1` | `k=5` | `k=10` | `k=20` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2, `11` | 40 | 3.59 (87) | 0.266 (29) | 0.163 (16) | 0.092 (9) |
+| `blockirwin.py` | | 0.010 | 0.023 | 0.030 | 0.063 |
+| 10, `42` | 40 | 0.498 (26) | 0.077 (6) | 0.016 (3) | 0.011 (3) |
+| `blockirwin.py` | | 0.038 | 0.035 | 0.047 | 0.072 |
+| 10, `42` | 100 | 3.06 (56) | 0.733 (12) | 0.367 (6) | 0.140 (3) |
+| `blockirwin.py` | | 0.086 | 0.133 | 0.172 | 0.278 |
 
 ## Command line, comparisons, and tests
 
@@ -329,6 +373,6 @@ input validation, and cancellation-triggered precision retries.
 `test_modalirwin_cancellation.py` checks signed-term accumulation,
 12-digit guard settings, per-mode diagnostics, precision reduction on
 an example, and the absence of wrapper-level global restarts.
-The independent `test_blockirwin.py` suite is not modified.
+The independent `test_blockirwin.py` suite does not use `modalirwin.py`.
 
 For the other method, see [`README-method1.md`](README-method1.md).

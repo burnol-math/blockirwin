@@ -41,12 +41,15 @@ Methods:
 **Performance and dependence on `k`.** `blockirwin.py` (method 1)
 becomes more costly as `k` grows. In contrast,
 `modalirwin.py` becomes faster with increasing `k`.
-For example, at `b=10`, `w="314"`, 40 digits,
-measured calls to `blockirwin.py` took 0.0124 s (`k=1`) versus 0.0234 s
-(`k=10`), while `modalirwin.py` 0.5.0 took 0.277 s versus 0.0045 s.
+For example, at `b=10`, `w="314"`, 40 digits (best of three runs,
+October 12, 2026, CPython 3.13.16, `mpmath` 1.4.1),
+calls to `blockirwin.py` took 0.026 s (`k=1`) versus 0.039 s
+(`k=10`), while `modalirwin.py` `0.6.0` took 0.305 s versus 0.0071 s.
+Of course timings are heavily hardware dependent.
 This is an illustration, not a universal ordering: method 1 often wins
-(by one order of magnitude at least)
-for small `k`, and both costs depend on the word, base, and precision.
+(by orders of magnitude).  For details about the heuristically estimated
+cubic cost in the number of modes see
+[README-modalirwin.md](README-modalirwin.md).
 
 
 ## Usage and validation
@@ -62,7 +65,7 @@ modalirwin(2, "01", 2, 20, modalcoeffs=True)
 
 ```sh
 python compare_modalirwin.py 2 01 0 20
-python -m pytest -q test_modalirwin.py test_blockirwin.py
+python -m pytest -q test_blockirwin.py test_modalirwin.py test_modalirwin_cancellation.py
 ```
 
 The modules use Python's standard library and `mpmath`.
@@ -78,11 +81,18 @@ and earlier Maple/SageMath/mpmath code of Jean-François Burnol.
 
 The complementary `modalirwin.py`, and other files inclusive of
 `test_modalirwin.py` and `compare_modalirwin.py` were produced with OpenAI
-ChatGPT (GPT-6) on October 10--11, 2026, from the two Burnol preprints.
+ChatGPT (GPT-6) on October 10-11, 2026, from the two Burnol preprints.
 
 This `README.md` was extended by ChatGPT (GPT-6) to cover this, and then
 edited (twice: on October 10 and again on October 11) by a human, to prune
 some too lengthy (and **too heavily decorated** like this) ChatGPT outputs.
+
+On October 12, 2026, Claude Opus 5.5 (Anthropic) made `test_blockirwin.py`
+run fully under current pytest, and revised the ChatGPT `modalirwin.py`
+into version `0.6.0`: exact integer level raising built once per call,
+removal of a defect which forced full precision in all modes, and new
+default levels; one test of `test_modalirwin.py` and
+`README-modalirwin.md` were adapted accordingly.
 
 The mathematics is fully authored by Jean-François Burnol. It was parsed
 by ChatGPT 5.6 Sol to search for errors (and improve the English language use).

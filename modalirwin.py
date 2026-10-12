@@ -7,8 +7,10 @@ The mathematics is entirely due to Jean-François Burnol:
 * "The modal expansion of Kempner sums" (2026), for k = 0.
 
 Independent Python + mpmath implementation produced by OpenAI GPT-6 on
-October 10, 2026.  This module coexists with the separate implementation
-in blockirwin.py, produced by Claude Opus 5.5 and Claude Sonnet 5.
+October 10, 2026.  Level raising and the Newton loop rewritten by
+Claude Opus 5.5 on October 12, 2026.  This module coexists with the
+separate implementation in blockirwin.py, produced by Claude Opus 5.5
+and Claude Sonnet 5.
 
 The stopping test uses an estimated tail bound, not a certified bound.
 For usage, source references, tests and license see README-modalirwin.md.
@@ -18,12 +20,14 @@ Licensed under CC BY-SA 4.0; see the repository LICENSE file.
 from __future__ import annotations
 
 from collections import defaultdict
+from functools import lru_cache
+from heapq import heappush, heappop
 from math import comb, ceil
 from operator import index
 import time
 from mpmath import mp
 
-__version__ = '0.5.0'
+__version__ = '0.6.0'
 
 
 def _print_fields(fields):
@@ -58,6 +62,78 @@ def _word_value(b, seq):
     return n
 
 
+def _horner(coefficients, x):
+    """Value at x of the polynomial with the given nonnegative integer
+    coefficients (constant term first); zero for an empty tuple."""
+    value = mp.zero
+    for coefficient in reversed(coefficients):
+        value = value*x + coefficient
+    return value
+
+
+@lru_cache(maxsize=64)
+def _raised_table(b, w, ell, initial):
+    """Level raising with exact integer coefficients, valid for all modes.
+
+    initial is a tuple of pairs (n, poly), poly a tuple of integers: the
+    coefficients of 1, c, c**2, ... where c = (1-lambda_j)/lambda_j.  An
+    argument n < b**(ell-1) is replaced by its children
+        b*n + a                      with factor  1   (0 <= a < b),
+        b**h*n + s                   with factor  c,
+        b**(h+1)*n + a*b**h + s      with factor -c   (0 <= a < b),
+        b**p*n + n(w)                with factor  c,
+    for each overlap period h of w, s being the value of the last h
+    digits of w.  The children of n are at least b*n, so taking the
+    arguments in increasing order (a heap) raises each argument once,
+    after all its contributions have arrived.  Contributions are merged
+    exactly.  Returns a tuple of triples (N, pos, neg), N increasing,
+    where pos and neg are the positive coefficients and the absolute
+    values of the negative ones; the structure depends on (b, w, ell)
+    and the initial arguments only, not on the mode j.
+    """
+    p = len(w)
+    nw = _word_value(b, w)
+    right = [(h, _word_value(b, w[p-h:])) for h in range(1, p)
+             if w[:p-h] == w[h:]]
+    cutoff = b**(ell-1)
+    table = {}
+    pending = []
+
+    def add(n, poly, shift, sign):
+        current = table.get(n)
+        if current is None:
+            current = table[n] = []
+            if n < cutoff:
+                heappush(pending, n)
+        need = len(poly)+shift
+        if len(current) < need:
+            current.extend([0]*(need-len(current)))
+        for i, coefficient in enumerate(poly):
+            current[i+shift] += sign*coefficient
+
+    for n, poly in initial:
+        add(n, poly, 0, 1)
+    while pending:
+        n = heappop(pending)
+        poly = table.pop(n)
+        if not any(poly):
+            continue
+        for a in range(b):
+            add(b*n+a, poly, 0, 1)
+        for h, suffix in right:
+            add(b**h*n+suffix, poly, 1, 1)
+            for a in range(b):
+                add(b**(h+1)*n+a*b**h+suffix, poly, 1, -1)
+        add(b**p*n+nw, poly, 1, 1)
+    result = []
+    for N in sorted(table):
+        poly = table[N]
+        if any(poly):
+            result.append((N, tuple(max(x, 0) for x in poly),
+                           tuple(max(-x, 0) for x in poly)))
+    return tuple(result)
+
+
 class _ModalEngine:
     """Triangular recurrences for the modal moments and coefficients.
 
@@ -90,6 +166,7 @@ class _ModalEngine:
         self._lams = {}
         self._diagonal = {}
         self._coefficient_rows = {}
+        self._tables = {}  # raised integer tables, see _table
         self._stats = defaultdict(int)
         self._internal_loss = mp.zero
 
@@ -215,90 +292,111 @@ class _ModalEngine:
                 self.U.append(self._signed_sum(u_parts))
         return self.R[m], self.U[m] if self.need_kempner else None
 
-    def _raised_arguments(self, j, initial):
-        """Raise Stieltjes arguments, retaining both signs separately.
+    def _table(self, name):
+        """Raised table of one group of initial arguments (see _raised_table).
 
-        At each raised argument, positive and negative weights are kept
-        apart until linear_A measures their cancellation.
+        'k1': the arguments of A_j for k >= 1, with the factor lambda_j
+        taken out (lambda_j - 1 = -lambda_j c);  'U' and 'R': the arguments
+        multiplied by the Kempner coefficients U and R for k = 0.
         """
-        counts = defaultdict(lambda: [mp.zero, mp.zero])
-        counts[int(initial)][0] = mp.one
-        cutoff = self.b**(self.ell-1)
+        if name not in self._tables:
+            b, w, nw = self.b, self.w, self.nw
+            initial = defaultdict(list)
+            if name == 'k1':
+                for d in range(1, b):
+                    initial[d].append((1,))
+                for h, suffix in self.right:
+                    for d in range(1, b):
+                        initial[d*b**h+suffix].append((0, -1))
+                if w[0]:
+                    initial[nw].append((0, 1))
+            elif all(x == 0 for x in w):
+                if name == 'U':
+                    for n in range(b, b*b):
+                        initial[n].append((1,))
+                else:
+                    for d in range(1, b):
+                        initial[d*b**self.p].append((-1,))
+            elif name == 'U':
+                for d in range(1, b):
+                    initial[d].append((1,))
+            elif w[0]:
+                initial[nw].append((-1,))
+            merged = []
+            for n in sorted(initial):
+                poly = [0]*max(len(x) for x in initial[n])
+                for x in initial[n]:
+                    for i, coefficient in enumerate(x):
+                        poly[i] += coefficient
+                merged.append((n, tuple(poly)))
+            self._tables[name] = _raised_table(b, tuple(w), self.ell,
+                                               tuple(merged))
+        return self._tables[name]
+
+    def linear_A(self, j, groups, tolerance):
+        """Evaluate the Newton sums of mode j over the raised arguments.
+
+        groups is a list of (scalar, table): the weight of a raised
+        argument N is the sum of scalar*P(c) over the groups, P the
+        integer polynomial of N in the table and c = (1-lambda_j)/lambda_j.
+        As c > 0, the positive and negative coefficients of P give the
+        positive and negative parts of the weight; their cancellation is
+        recorded by _signed_sum.  Newton-series contributions are then
+        accumulated by sign, one row at a time.
+        """
         lam = self.lam(j)
         c = (1-lam)/lam
-
-        def add(n, contribution):
-            if contribution > 0:
-                counts[n][0] += contribution
-            elif contribution < 0:
-                counts[n][1] -= contribution
-
-        while True:
-            small = [n for n, (pos, neg) in counts.items()
-                     if n < cutoff and (pos or neg)]
-            if not small:
-                break
-            n = min(small)
-            pos, neg = counts.pop(n)
-            for coeff in (pos, -neg):
-                if not coeff:
-                    continue
-                for a in range(self.b):
-                    add(self.b*n+a, coeff)
-                for h, suffix in self.right:
-                    add(self.b**h*n+suffix, coeff*c)
-                    for a in range(self.b):
-                        add(self.b**(h+1)*n+a*self.b**h+suffix, -coeff*c)
-                add(self.b**self.p*n+self.nw, coeff*c)
-        return {n: (pos, neg) for n, (pos, neg) in counts.items()
-                if pos or neg}
-
-    def linear_A(self, j, arguments, tolerance):
-        """Evaluate Newton sums after sign-separated level raising.
-
-        Raised weights are netted after their cancellation is recorded;
-        Newton-series contributions are then accumulated by sign.
-        """
-        raised_plus = defaultdict(lambda: mp.zero)
-        raised_minus = defaultdict(lambda: mp.zero)
-        for n, coeff in arguments.items():
-            if not coeff:
+        plus = defaultdict(lambda: mp.zero)
+        minus = defaultdict(lambda: mp.zero)
+        for scalar, table in groups:
+            if not scalar:
                 continue
-            for N, (pos, neg) in self._raised_arguments(j, n).items():
-                if coeff > 0:
-                    raised_plus[N] += coeff*pos
-                    raised_minus[N] += coeff*neg
-                else:
-                    raised_plus[N] -= coeff*neg
-                    raised_minus[N] -= coeff*pos
-        # Track cancellation before forming the net raised weights.
-        raised = {N: self._signed_sum([raised_plus[N], -raised_minus[N]])
-                  for N in raised_plus.keys() | raised_minus.keys()}
-        if not raised:
+            size = abs(scalar)
+            for N, pos, neg in table:
+                P, M = _horner(pos, c), _horner(neg, c)
+                if scalar < 0:
+                    P, M = M, P
+                if P:
+                    plus[N] += size*P
+                if M:
+                    minus[N] += size*M
+        positive_args, negative_args = [], []
+        for N in sorted(plus.keys() | minus.keys()):
+            weight = self._signed_sum([plus[N], -minus[N]])
+            if weight > 0:
+                positive_args.append((N, weight))
+            elif weight < 0:
+                negative_args.append((N, -weight))
+        if not positive_args and not negative_args:
             return mp.zero, mp.zero, mp.zero
-        powers = {N: mp.power(N, -j) for N in raised}
+        Np = [N for N, _ in positive_args]
+        Nm = [N for N, _ in negative_args]
+        wp = [x for _, x in positive_args]
+        wm = [x for _, x in negative_args]
+        pp = [mp.power(N, -j) for N in Np]
+        pm = [mp.power(N, -j) for N in Nm]
         positives, negatives = [], []
         q = 0
         while True:
-            binomial = comb(j+q-1, q)
-            moment = self._mom(j, q)
-            signed_factor = (-1 if q % 2 else 1)*binomial*moment
-            for N, weight in raised.items():
-                contribution = signed_factor*weight*powers[N]
-                if contribution >= 0:
-                    positives.append(contribution)
-                else:
-                    negatives.append(-contribution)
-            self._stats['newton_rows'] += 1
-            for N in powers:
-                powers[N] /= N
-            q += 1
-            omitted = comb(j+q-1, q)*mp.fsum(abs(raised[N])*abs(powers[N])
-                                                for N in raised)
-            if omitted < tolerance:
+            Sp = mp.fdot(wp, pp) if wp else mp.zero
+            Sm = mp.fdot(wm, pm) if wm else mp.zero
+            # Omitted rows: binomial*sum |w_N| N^(-j-q), moments being <= 1.
+            if q and comb(j+q-1, q)*(Sp+Sm) < tolerance:
                 break
             if q > 20000:
                 raise ArithmeticError('Newton series did not reach requested tolerance')
+            signed_factor = ((-1 if q % 2 else 1)*comb(j+q-1, q)
+                             * self._mom(j, q))
+            if signed_factor >= 0:
+                positives.append(signed_factor*Sp)
+                negatives.append(signed_factor*Sm)
+            else:
+                positives.append(-signed_factor*Sm)
+                negatives.append(-signed_factor*Sp)
+            self._stats['newton_rows'] += 1
+            pp = [x/N for x, N in zip(pp, Np)]
+            pm = [x/N for x, N in zip(pm, Nm)]
+            q += 1
         positive = mp.fsum(positives)
         negative = mp.fsum(negatives)
         return positive-negative, positive, negative
@@ -330,15 +428,8 @@ class _ModalEngine:
             lam = self.lam(j)
             multiplier = R*lam**(k-1)
             tolerance = tolerance/max(mp.mpf('1e-60'), abs(multiplier))
-            a = defaultdict(lambda: mp.zero)
-            for d in range(1,self.b):
-                a[d] += lam
-            for h,suffix in self.right:
-                for d in range(1,self.b):
-                    a[d*self.b**h+suffix] += lam-1
-            if self.w[0]:
-                a[self.nw] -= lam-1
-            left, positive, negative = self.linear_A(j,a,tolerance)
+            left, positive, negative = self.linear_A(
+                j, [(lam, self._table('k1'))], tolerance)
             if m%2:
                 left, positive, negative = -left, negative, positive
             term = left*multiplier
@@ -346,18 +437,8 @@ class _ModalEngine:
                 positive, negative = negative, positive
             magnitude = abs(multiplier)
             return term, (lam, left, R), positive*magnitude, negative*magnitude
-        a = defaultdict(lambda: mp.zero)
-        if all(x == 0 for x in self.w):
-            for n in range(self.b,self.b*self.b):
-                a[n] += U
-            for d in range(1,self.b):
-                a[d*self.b**self.p] -= R
-        else:
-            for d in range(1,self.b):
-                a[d] += U
-            if self.w[0]:
-                a[self.nw] -= R
-        term, positive, negative = self.linear_A(j,a,tolerance)
+        term, positive, negative = self.linear_A(
+            j, [(U, self._table('U')), (R, self._table('R'))], tolerance)
         if m%2:
             term, positive, negative = -term, negative, positive
         return term, None, positive, negative
@@ -390,7 +471,9 @@ def _modalirwin_once(b: int, w, k: int, nboffigures=100,
         raise ValueError('nboffigures must be >= 6')
     nboffigures = int(nboffigures)
     if ell is None:
-        ell = 3 if b == 2 else 2
+        # Fastest levels at 40 digits for b = 2, 3, 4, measured on
+        # October 12, 2026; other bases keep the earlier default 2.
+        ell = {2: 5, 3: 4, 4: 3}.get(b, 2)
     if int(ell) != ell or ell < 2:
         raise ValueError('ell must be an integer >= 2')
     ell = int(ell)
