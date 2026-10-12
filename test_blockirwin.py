@@ -3,6 +3,7 @@
 
 Produced on September 28, 2026 by Claude Opus 5.5 and Claude Sonnet 5.  License: CC BY-SA 4.0.
 Run:  python test_blockirwin.py
+  or  python -m pytest -q test_blockirwin.py
 
 Sources: (1) published literature (Schmelzer-Baillie 2008; Baillie,
 arXiv:0806.4410; Burnol, arXiv:2402.14761; irwin README). (2) values
@@ -140,7 +141,7 @@ def _check(refs, label):
     return bad
 
 
-def test_levels(nd=120):
+def _levels(nd=120):
     cases = [(2, "101", 2, (6, 9, 13)), (2, "1111", 3, (6, 9, 13)),
              (2, "0110", 1, (6, 9, 13)), (3, "1212", 2, (3, 5, 7)),
              (10, "999", 2, (2, 3, 4)), (10, "010", 1, (2, 3, 4)),
@@ -167,7 +168,7 @@ def _lambda(b, w, j):
     return E / D
 
 
-def test_modal(nd=100):
+def _decay_rate(nd=100):
     bad = 0
     cases = [(2, "101"), (2, "1111"), (2, "000"), (3, "1212")]
     for b, w in cases:
@@ -184,15 +185,32 @@ def test_modal(nd=100):
         ok = abs(ratio / expected - 1) < tol
         bad += not ok
         if not ok:
-            print(f"  MISMATCH modal b={b} w={w}: ratio={nstr(ratio,12)}"
+            print(f"  MISMATCH decay rate b={b} w={w}: ratio={nstr(ratio,12)}"
                   f" expected={nstr(expected,12)}")
-    print(f"modal decay rate: {bad} mismatch(es) out of {len(cases)}")
+    print(f"large-k decay rate: {bad} mismatch(es) out of {len(cases)}")
     return bad
+
+
+# pytest entry points: each asserts, returns None.
+def test_published_literature():
+    assert _check(REFERENCES, "published literature") == 0
+
+
+def test_author_february_2024():
+    assert _check(REFERENCES_PRIVATE, "author, February 2024") == 0
+
+
+def test_levels():
+    assert _levels() == 0
+
+
+def test_large_k_decay_rate():
+    assert _decay_rate() == 0
 
 
 if __name__ == "__main__":
     bad = _check(REFERENCES, "published literature")
     bad += _check(REFERENCES_PRIVATE, "author, February 2024")
-    bad += test_levels()
-    bad += test_modal()
+    bad += _levels()
+    bad += _decay_rate()
     print("ALL TESTS PASSED" if bad == 0 else f"{bad} FAILURE(S)")
